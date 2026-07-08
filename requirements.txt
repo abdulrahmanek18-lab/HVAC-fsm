@@ -3,3 +3,6 @@ uvicorn>=0.30.0
 pydantic>=2.10.5
 pydantic-core>=2.27.2
 python-multipart==0.0.20
+python-dotenv>=1.0.1
+supabase>=2.4.0
+requests>=2.31.0
