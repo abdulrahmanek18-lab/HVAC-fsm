@@ -1,0 +1,13 @@
+{
+  "template_id": "your-service-report-template-id",
+  "data": {
+    "service_report_number": "SR-20250101-000001",
+    "client_name": "ABC Apartments",
+    "full_address": "Line 1, Line 2, City, State, Postal Code",
+    "flat_number": "A-1202",
+    "scheduled_date_time": "2025-01-01T10:30:00+00:00",
+    "nature_of_complaint": "AC not cooling",
+    "automated_staff_name": "Technician Name",
+    "automated_staff_id": "authenticated-user-uuid"
+  }
+}
