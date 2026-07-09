@@ -76,23 +76,33 @@ class ACCondition(str, Enum):
     not_working = "not_working"
 
 
+class AuthContext(BaseModel):
+    user_id: str
+    email: EmailStr
+    full_name: str
+    role: UserRole
+    jwt: str
+
+
+class ProfileCreate(BaseModel):
+    user_id: str
+    email: EmailStr
+    full_name: str = Field(min_length=1, max_length=200)
+    role: UserRole = UserRole.technician
+    phone: Optional[str] = None
+    is_active: bool = True
+
+
 class ProfileOut(BaseModel):
-    id: UUID
+    id: str = Field(alias="$id")
+    user_id: str
     email: EmailStr
     full_name: str
     role: UserRole
     phone: Optional[str] = None
-    is_active: bool
+    is_active: bool = True
 
-    model_config = ConfigDict(from_attributes=True)
-
-
-class AuthContext(BaseModel):
-    user_id: UUID
-    email: EmailStr
-    full_name: str
-    role: UserRole
-    access_token: str
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class AMCDetailsCreate(BaseModel):
@@ -114,43 +124,46 @@ class AMCDetailsCreate(BaseModel):
 class ClientCreate(BaseModel):
     customer_type: CustomerType
     name: str = Field(min_length=1, max_length=200)
-    contact_person: Optional[str] = None
+    contact_person: Optional[str] = Field(default=None, max_length=200)
     phone: str = Field(min_length=5, max_length=40)
     email: Optional[EmailStr] = None
-    address_line1: str = Field(min_length=1)
-    address_line2: Optional[str] = None
-    city: str = Field(min_length=1)
-    state: str = Field(min_length=1)
-    postal_code: Optional[str] = None
-    flat_number: Optional[str] = None
+    address_line1: str = Field(min_length=1, max_length=300)
+    address_line2: Optional[str] = Field(default=None, max_length=300)
+    city: str = Field(min_length=1, max_length=100)
+    state: str = Field(min_length=1, max_length=100)
+    postal_code: Optional[str] = Field(default=None, max_length=40)
+    flat_number: Optional[str] = Field(default=None, max_length=80)
     notes: Optional[str] = None
     amc_details: Optional[AMCDetailsCreate] = None
 
     @field_validator("amc_details")
     @classmethod
-    def require_amc_details_for_amc(cls, amc_details: Optional[AMCDetailsCreate], info: Any) -> Optional[AMCDetailsCreate]:
+    def require_amc_details_for_amc(
+        cls,
+        amc_details: Optional[AMCDetailsCreate],
+        info: Any,
+    ) -> Optional[AMCDetailsCreate]:
         if info.data.get("customer_type") == CustomerType.amc and amc_details is None:
             raise ValueError("amc_details is required when customer_type is amc")
         return amc_details
 
 
-class ClientOut(BaseModel):
-    id: UUID
-    customer_type: CustomerType
-    name: str
-    phone: str
-    email: Optional[str] = None
-    address_line1: str
-    address_line2: Optional[str] = None
-    city: str
-    state: str
-    postal_code: Optional[str] = None
-    flat_number: Optional[str] = None
-    created_at: datetime
+class ClientUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    contact_person: Optional[str] = Field(default=None, max_length=200)
+    phone: Optional[str] = Field(default=None, min_length=5, max_length=40)
+    email: Optional[EmailStr] = None
+    address_line1: Optional[str] = Field(default=None, min_length=1, max_length=300)
+    address_line2: Optional[str] = Field(default=None, max_length=300)
+    city: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    state: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    postal_code: Optional[str] = Field(default=None, max_length=40)
+    flat_number: Optional[str] = Field(default=None, max_length=80)
+    notes: Optional[str] = None
 
 
 class ACUnitCreate(BaseModel):
-    client_id: UUID
+    client_id: str = Field(min_length=1)
     unit_number: str = Field(min_length=1, max_length=80)
     brand: ACBrand
     refrigerant: RefrigerantType
@@ -164,6 +177,7 @@ class ACUnitUpdateMetrics(BaseModel):
     pressure: Optional[float] = Field(default=None, ge=0)
     ampere: Optional[float] = Field(default=None, ge=0)
     condition: Optional[ACCondition] = None
+    location_description: Optional[str] = None
     last_serviced_at: Optional[datetime] = None
 
 
@@ -174,15 +188,15 @@ class BarcodeParseRequest(BaseModel):
 class BarcodeParseResponse(BaseModel):
     valid: bool
     barcode_value: str
-    client_id: Optional[UUID] = None
+    client_id: Optional[str] = None
     unit_number: Optional[str] = None
     asset_uuid: Optional[UUID] = None
 
 
 class ServiceReportCreate(BaseModel):
-    client_id: UUID
-    ac_unit_id: Optional[UUID] = None
-    assigned_technician_id: Optional[UUID] = None
+    client_id: str = Field(min_length=1)
+    ac_unit_id: Optional[str] = None
+    assigned_technician_id: Optional[str] = None
     scheduled_at: datetime
     nature_of_complaint: str = Field(min_length=1)
 
@@ -190,6 +204,8 @@ class ServiceReportCreate(BaseModel):
 class ServiceReportUpdate(BaseModel):
     work_performed: Optional[str] = None
     technician_observations: Optional[str] = None
+    pressure_after_service: Optional[float] = Field(default=None, ge=0)
+    ampere_after_service: Optional[float] = Field(default=None, ge=0)
     status: Optional[ServiceReportStatus] = None
     completed_at: Optional[datetime] = None
 
@@ -217,18 +233,26 @@ class InvoiceItemCreate(BaseModel):
 
 
 class InvoiceCreate(BaseModel):
-    client_id: UUID
-    service_report_id: Optional[UUID] = None
+    client_id: str = Field(min_length=1)
+    service_report_id: Optional[str] = None
     due_date: Optional[date] = None
     tax_amount: float = Field(default=0, ge=0)
     notes: Optional[str] = None
     items: list[InvoiceItemCreate] = Field(min_length=1)
 
 
+class InvoiceStatusUpdate(BaseModel):
+    status: InvoiceStatus
+
+
 class ExpenseCreate(BaseModel):
-    service_report_id: Optional[UUID] = None
+    service_report_id: Optional[str] = None
     category: ExpenseCategory
     amount: float = Field(ge=0)
     expense_date: date = Field(default_factory=date.today)
     description: str = Field(min_length=1)
     receipt_url: Optional[str] = None
+
+
+class ExpenseApprovalUpdate(BaseModel):
+    approved: bool
