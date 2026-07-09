@@ -6,9 +6,10 @@ import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from io import BytesIO
+from pathlib import Path
 from typing import Any, Optional
 
-import httpx
 from appwrite.client import Client
 from appwrite.exception import AppwriteException
 from appwrite.id import ID
@@ -16,6 +17,7 @@ from appwrite.query import Query
 from appwrite.services.account import Account
 from appwrite.services.databases import Databases
 from appwrite.services.users import Users
+from pypdf import PdfReader, PdfWriter
 
 from models import (
     ACUnitCreate,
@@ -32,8 +34,6 @@ from models import (
     ServiceReportCreate,
     ServiceReportStatus,
     ServiceReportUpdate,
-    ScribeGenerateRequest,
-    ScribeTemplateData,
     UserRole,
 )
 
@@ -48,6 +48,8 @@ COLLECTION_SERVICE_REPORTS = os.getenv("APPWRITE_COLLECTION_SERVICE_REPORTS", "s
 COLLECTION_INVOICES = os.getenv("APPWRITE_COLLECTION_INVOICES", "invoices")
 COLLECTION_INVOICE_ITEMS = os.getenv("APPWRITE_COLLECTION_INVOICE_ITEMS", "invoice_items")
 COLLECTION_EXPENSES = os.getenv("APPWRITE_COLLECTION_EXPENSES", "expenses")
+
+PDF_TEMPLATE_FILENAME = "service_report_template.pdf"
 
 
 class AppError(Exception):
@@ -69,15 +71,14 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def compact_document(document: dict[str, Any]) -> dict[str, Any]:
-    return dict(document)
-
-
 def clean_none(data: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in data.items() if value is not None}
 
 
-def appwrite_error_to_app_error(exc: AppwriteException, fallback_message: str = "Appwrite operation failed") -> AppError:
+def appwrite_error_to_app_error(
+    exc: AppwriteException,
+    fallback_message: str = "Appwrite operation failed",
+) -> AppError:
     status_code = getattr(exc, "code", None) or 500
     message = getattr(exc, "message", None) or fallback_message
     return AppError(message=message, status_code=int(status_code), details=str(exc))
@@ -258,7 +259,7 @@ def get_or_create_profile(
         "email": account_user.get("email") or admin_user.get("email"),
         "full_name": full_name,
         "role": role.value,
-        "phone": (admin_user.get("phone") or None),
+        "phone": admin_user.get("phone") or None,
         "is_active": True,
         "created_at": utc_now_iso(),
         "updated_at": utc_now_iso(),
@@ -701,12 +702,6 @@ def update_ac_unit_metrics(
 
     update_data = payload.model_dump(exclude_unset=True, mode="json")
 
-    if "condition" in update_data and update_data["condition"] is not None:
-        update_data["condition"] = update_data["condition"]
-
-    if "last_serviced_at" in update_data and update_data["last_serviced_at"] is not None:
-        update_data["last_serviced_at"] = update_data["last_serviced_at"]
-
     if not update_data:
         raise AppError("No fields provided for update", 400)
 
@@ -779,8 +774,6 @@ def create_service_report(
             "pressure_after_service": None,
             "ampere_after_service": None,
             "status": ServiceReportStatus.scheduled.value,
-            "scribe_payload": None,
-            "scribe_document_url": None,
             "completed_at": None,
             "created_by_id": ctx.user_id,
             "created_by_name": ctx.full_name,
@@ -825,6 +818,8 @@ def get_service_report(
             )
         except AppError:
             report["ac_unit"] = None
+    else:
+        report["ac_unit"] = None
 
     return report
 
@@ -879,6 +874,8 @@ def list_assigned_service_reports(
                 )
             except AppError:
                 report["ac_unit"] = None
+        else:
+            report["ac_unit"] = None
 
         enriched_reports.append(report)
 
@@ -935,107 +932,185 @@ def build_full_address(client_doc: dict[str, Any]) -> str:
     return ", ".join(str(part) for part in parts if part)
 
 
-def build_scribe_payload(
-    report: dict[str, Any],
-    ctx: AuthContext,
-    template_id: str,
-) -> ScribeGenerateRequest:
+def format_pdf_value(value: Any) -> str:
+    if value is None:
+        return ""
+
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    if isinstance(value, date):
+        return value.isoformat()
+
+    return str(value)
+
+
+def build_service_report_pdf_payload(report: dict[str, Any], ctx: AuthContext) -> dict[str, str]:
     client_doc = report.get("client")
+    ac_unit = report.get("ac_unit")
 
     if not client_doc:
         raise AppError("Client data missing from service report", 500)
 
-    template_data = ScribeTemplateData(
-        service_report_number=report["report_number"],
-        client_name=client_doc["name"],
-        full_address=build_full_address(client_doc),
-        flat_number=client_doc.get("flat_number"),
-        scheduled_date_time=str(report["scheduled_at"]),
-        nature_of_complaint=report["nature_of_complaint"],
-        automated_staff_name=ctx.full_name,
-        automated_staff_id=ctx.user_id,
-    )
+    ac_unit_id = ""
+    ac_unit_brand = ""
+    ac_unit_refrigerant_type = ""
+    ac_unit_pressure = ""
+    ac_unit_ampere = ""
+    ac_unit_condition = ""
+    ac_unit_unit_number = ""
+    ac_unit_barcode_value = ""
 
-    return ScribeGenerateRequest(
-        template_id=template_id,
-        data=template_data,
-    )
+    if ac_unit:
+        ac_unit_id = format_pdf_value(ac_unit.get("$id"))
+        ac_unit_brand = format_pdf_value(ac_unit.get("brand"))
+        ac_unit_refrigerant_type = format_pdf_value(ac_unit.get("refrigerant"))
+        ac_unit_pressure = format_pdf_value(ac_unit.get("pressure"))
+        ac_unit_ampere = format_pdf_value(ac_unit.get("ampere"))
+        ac_unit_condition = format_pdf_value(ac_unit.get("condition"))
+        ac_unit_unit_number = format_pdf_value(ac_unit.get("unit_number"))
+        ac_unit_barcode_value = format_pdf_value(ac_unit.get("barcode_value"))
+
+    asset_metrics = "\n".join(
+        [
+            f"AC Unit ID: {ac_unit_id}",
+            f"Unit Number: {ac_unit_unit_number}",
+            f"Brand: {ac_unit_brand}",
+            f"Refrigerant Type: {ac_unit_refrigerant_type}",
+            f"Pressure: {ac_unit_pressure}",
+            f"Ampere: {ac_unit_ampere}",
+            f"Condition: {ac_unit_condition}",
+            f"Barcode: {ac_unit_barcode_value}",
+        ]
+    ).strip()
+
+    payload = {
+        "service_report_number": format_pdf_value(report.get("report_number")),
+        "client_name": format_pdf_value(client_doc.get("name")),
+        "full_address": build_full_address(client_doc),
+        "flat_number": format_pdf_value(client_doc.get("flat_number")),
+        "scheduled_date_time": format_pdf_value(report.get("scheduled_at")),
+        "nature_of_complaint": format_pdf_value(report.get("nature_of_complaint")),
+        "automated_staff_name": format_pdf_value(ctx.full_name),
+        "automated_staff_id": format_pdf_value(ctx.user_id),
+        "assigned_technician_name": format_pdf_value(report.get("assigned_technician_name") or ctx.full_name),
+        "assigned_technician_id": format_pdf_value(report.get("assigned_technician_id") or ctx.user_id),
+        "work_performed": format_pdf_value(report.get("work_performed")),
+        "technician_observations": format_pdf_value(report.get("technician_observations")),
+        "ac_unit_id": ac_unit_id,
+        "ac_unit_unit_number": ac_unit_unit_number,
+        "ac_unit_barcode_value": ac_unit_barcode_value,
+        "ac_unit_brand": ac_unit_brand,
+        "ac_unit_refrigerant_type": ac_unit_refrigerant_type,
+        "ac_unit_pressure": ac_unit_pressure,
+        "ac_unit_ampere": ac_unit_ampere,
+        "ac_unit_condition": ac_unit_condition,
+        "asset_metrics": asset_metrics,
+    }
+
+    return payload
 
 
-async def generate_scribe_document(
-    databases: Databases,
-    database_id: str,
-    report_id: str,
-    payload: ScribeGenerateRequest,
-) -> dict[str, Any]:
-    api_base_url = os.getenv("SCRIBE_API_BASE_URL", "").rstrip("/")
-    api_key = os.getenv("SCRIBE_API_KEY", "")
-    generate_path = os.getenv("SCRIBE_DOCUMENT_GENERATE_PATH", "/documents/generate")
+def resolve_pdf_template_path() -> Path:
+    template_path = Path.cwd() / PDF_TEMPLATE_FILENAME
 
-    if not api_base_url:
-        raise AppError("SCRIBE_API_BASE_URL is not configured", 500)
+    if not template_path.exists():
+        raise AppError(
+            message=f"PDF template not found: {PDF_TEMPLATE_FILENAME}",
+            status_code=500,
+            details=f"Expected template at {template_path}",
+        )
 
-    if not api_key:
-        raise AppError("SCRIBE_API_KEY is not configured", 500)
+    if not template_path.is_file():
+        raise AppError(
+            message=f"PDF template path is not a file: {PDF_TEMPLATE_FILENAME}",
+            status_code=500,
+            details=str(template_path),
+        )
 
-    endpoint = f"{api_base_url}{generate_path}"
+    return template_path
+
+
+def get_pdf_form_field_names(template_path: Path) -> set[str]:
+    try:
+        reader = PdfReader(str(template_path))
+        fields = reader.get_fields() or {}
+        return set(fields.keys())
+    except Exception as exc:
+        raise AppError("Unable to inspect PDF form fields", 500, str(exc)) from exc
+
+
+def fill_service_report_pdf(payload: dict[str, str]) -> bytes:
+    template_path = resolve_pdf_template_path()
 
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(
-                endpoint,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload.model_dump(mode="json"),
-            )
+        reader = PdfReader(str(template_path))
+        writer = PdfWriter()
 
-        if response.status_code >= 400:
+        writer.append(reader)
+
+        if not reader.get_fields():
             raise AppError(
-                "Scribe document generation failed",
-                response.status_code,
-                response.text,
+                message="PDF template does not contain fillable form fields",
+                status_code=500,
+                details="Ensure the Scribus-exported PDF contains AcroForm text fields.",
             )
 
-        content_type = response.headers.get("content-type", "")
+        try:
+            writer.set_need_appearances_writer(True)
+        except Exception:
+            pass
 
-        if "application/json" in content_type.lower():
-            result = response.json()
-        else:
-            result = {
-                "content_type": content_type,
-                "raw_response": response.text,
-            }
-
-        document_url = (
-            result.get("document_url")
-            or result.get("download_url")
-            or result.get("url")
-        )
-
-        update_data: dict[str, Any] = {
-            "scribe_payload": payload.model_dump(mode="json"),
-            "updated_at": utc_now_iso(),
+        existing_fields = reader.get_fields() or {}
+        filtered_payload = {
+            field_name: field_value
+            for field_name, field_value in payload.items()
+            if field_name in existing_fields
         }
 
-        if document_url:
-            update_data["scribe_document_url"] = document_url
+        if not filtered_payload:
+            raise AppError(
+                message="No matching PDF fields found for service report payload",
+                status_code=500,
+                details={
+                    "template_fields": sorted(existing_fields.keys()),
+                    "payload_fields": sorted(payload.keys()),
+                },
+            )
 
-        update_document(
-            databases=databases,
-            database_id=database_id,
-            collection_id=COLLECTION_SERVICE_REPORTS,
-            document_id=report_id,
-            data=update_data,
-        )
+        for page in writer.pages:
+            writer.update_page_form_field_values(page, filtered_payload)
 
-        return result
+        output = BytesIO()
+        writer.write(output)
+        return output.getvalue()
 
     except AppError:
         raise
-    except httpx.RequestError as exc:
-        raise AppError("Unable to connect to Scribe API", 502, str(exc)) from exc
+    except Exception as exc:
+        raise AppError("Failed to populate local Scribus PDF template", 500, str(exc)) from exc
+
+
+def generate_service_report_pdf_bytes(
+    databases: Databases,
+    database_id: str,
+    ctx: AuthContext,
+    report_id: str,
+) -> tuple[bytes, str]:
+    report = get_service_report(
+        databases=databases,
+        database_id=database_id,
+        ctx=ctx,
+        report_id=report_id,
+    )
+
+    payload = build_service_report_pdf_payload(report, ctx)
+    pdf_bytes = fill_service_report_pdf(payload)
+
+    safe_report_number = re.sub(r"[^A-Za-z0-9_-]", "_", payload["service_report_number"] or report_id)
+    filename = f"{safe_report_number}.pdf"
+
+    return pdf_bytes, filename
 
 
 def create_invoice(
