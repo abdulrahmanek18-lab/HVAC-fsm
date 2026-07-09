@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from io import BytesIO
 from typing import Annotated
 
 from appwrite.client import Client
@@ -9,7 +10,7 @@ from appwrite.services.users import Users
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 import crud
 from models import (
@@ -38,7 +39,6 @@ required_env_vars = [
     "APPWRITE_ENDPOINT",
     "APPWRITE_PROJECT_ID",
     "APPWRITE_API_KEY",
-    "SCRIBE_TEMPLATE_ID",
 ]
 
 missing_env_vars = [key for key in required_env_vars if not os.getenv(key)]
@@ -59,12 +59,11 @@ databases = Databases(client)
 users = Users(client)
 
 DATABASE_ID = os.getenv("APPWRITE_DATABASE_ID", "default_hvac_db")
-SCRIBE_TEMPLATE_ID = os.getenv("SCRIBE_TEMPLATE_ID")
 
 
 app = FastAPI(
     title=APP_NAME,
-    version="2.0.0-appwrite",
+    version="3.0.0-appwrite-scribus-local-pdf",
     debug=APP_DEBUG,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -162,6 +161,7 @@ async def health() -> dict[str, str]:
         "app": APP_NAME,
         "environment": APP_ENV,
         "database_provider": "appwrite",
+        "pdf_engine": "local-scribus-template-pypdf",
     }
 
 
@@ -351,8 +351,8 @@ async def update_service_report_endpoint(
     )
 
 
-@app.get("/service-reports/{report_id}/scribe-payload")
-async def get_scribe_payload_endpoint(
+@app.get("/service-reports/{report_id}/pdf-payload")
+async def get_service_report_pdf_payload_endpoint(
     report_id: str,
     ctx: Annotated[AuthContext, Depends(get_auth_context)],
 ) -> dict:
@@ -363,39 +363,90 @@ async def get_scribe_payload_endpoint(
         report_id=report_id,
     )
 
-    payload = crud.build_scribe_payload(
-        report=report,
-        ctx=ctx,
-        template_id=SCRIBE_TEMPLATE_ID,
-    )
-
-    return payload.model_dump(mode="json")
+    return crud.build_service_report_pdf_payload(report=report, ctx=ctx)
 
 
-@app.post("/service-reports/{report_id}/scribe-pdf")
-async def generate_scribe_pdf_endpoint(
+@app.get("/service-reports/{report_id}/pdf")
+async def download_service_report_pdf_endpoint(
     report_id: str,
     ctx: Annotated[AuthContext, Depends(get_auth_context)],
+) -> StreamingResponse:
+    pdf_bytes, filename = crud.generate_service_report_pdf_bytes(
+        databases=databases,
+        database_id=DATABASE_ID,
+        ctx=ctx,
+        report_id=report_id,
+    )
+
+    return StreamingResponse(
+        BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@app.get("/service-reports/{report_id}/download")
+async def download_service_report_pdf_alias_endpoint(
+    report_id: str,
+    ctx: Annotated[AuthContext, Depends(get_auth_context)],
+) -> StreamingResponse:
+    pdf_bytes, filename = crud.generate_service_report_pdf_bytes(
+        databases=databases,
+        database_id=DATABASE_ID,
+        ctx=ctx,
+        report_id=report_id,
+    )
+
+    return StreamingResponse(
+        BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@app.get("/pdf-template/fields")
+async def list_pdf_template_fields_endpoint(
+    ctx: Annotated[AuthContext, Depends(get_auth_context)],
 ) -> dict:
-    report = crud.get_service_report(
-        databases=databases,
-        database_id=DATABASE_ID,
-        ctx=ctx,
-        report_id=report_id,
-    )
+    if ctx.role.value != "admin_staff":
+        raise HTTPException(status_code=403, detail="Admin/Staff role required")
 
-    payload = crud.build_scribe_payload(
-        report=report,
-        ctx=ctx,
-        template_id=SCRIBE_TEMPLATE_ID,
-    )
+    template_path = crud.resolve_pdf_template_path()
+    fields = crud.get_pdf_form_field_names(template_path)
 
-    return await crud.generate_scribe_document(
-        databases=databases,
-        database_id=DATABASE_ID,
-        report_id=report_id,
-        payload=payload,
-    )
+    return {
+        "template": str(template_path),
+        "fields": sorted(fields),
+        "expected_service_report_fields": [
+            "service_report_number",
+            "client_name",
+            "full_address",
+            "flat_number",
+            "scheduled_date_time",
+            "nature_of_complaint",
+            "automated_staff_name",
+            "automated_staff_id",
+            "assigned_technician_name",
+            "assigned_technician_id",
+            "work_performed",
+            "technician_observations",
+            "ac_unit_id",
+            "ac_unit_unit_number",
+            "ac_unit_barcode_value",
+            "ac_unit_brand",
+            "ac_unit_refrigerant_type",
+            "ac_unit_pressure",
+            "ac_unit_ampere",
+            "ac_unit_condition",
+            "asset_metrics",
+        ],
+    }
 
 
 # ============================================================
