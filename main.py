@@ -991,7 +991,7 @@ async def root(
     return HTMLResponse(render_dashboard(ctx))
 
 
-@app.get("/login", response_class=HTMLResponse)
+@app.get("/login", response_class=HTMLResponse, response_model=None)
 async def login_get(
     ctx: Annotated[Optional[AuthContext], Depends(optional_context)],
 ) -> HTMLResponse | RedirectResponse:
