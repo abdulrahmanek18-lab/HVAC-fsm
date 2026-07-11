@@ -404,8 +404,8 @@ async def get_current_context(
 #             data#bases=databases,
 #             users=users,
 #             database_id=DATABASE_ID,
-            )
-        except crud.AppError as exc:
+#            )
+#        except crud.AppError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
 
     if session_cookie:
