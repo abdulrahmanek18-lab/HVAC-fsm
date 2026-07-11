@@ -395,7 +395,7 @@ async def get_current_context(
 # 1. Optional Bearer Appwrite JWT for API clients.
     1. Signed local HttpOnly cookie for browser sessions.
     """
-async def get_current_context(
+async def get_current_context(authorization: str = Header(None), session_cookie: str = Cookie(None)):
     pass
 
     if session_cookie:
