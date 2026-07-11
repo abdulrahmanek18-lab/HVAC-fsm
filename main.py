@@ -1001,7 +1001,7 @@ async def login_get(
     return HTMLResponse(login_html())
 
 
-@app.post("/login")
+@app.post("/login, response_model=None")
 async def login_post(
     username: Annotated[str, Form()],
     password: Annotated[str, Form()],
