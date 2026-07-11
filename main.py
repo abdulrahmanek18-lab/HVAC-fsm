@@ -395,18 +395,11 @@ async def get_current_context(
 # 1. Optional Bearer Appwrite JWT for API clients.
     1. Signed local HttpOnly cookie for browser sessions.
     """
-# bearer = extract_bearer_token(authorization)
+async def get_current_context(
+    pass
 
-# if bearer:
-#     try:
-#         return crud.resolve_auth_context(
-#             jwt=bearer,
-#             data#bases=databases,
-#             users=users,
-#             database_id=DATABASE_ID,
-#            )
-#        except crud.AppError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    if session_cookie:
+        payload = unsign_payload(session_cookie)
 
     if session_cookie:
         payload = unsign_payload(session_cookie)
