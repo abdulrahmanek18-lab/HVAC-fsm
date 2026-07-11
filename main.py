@@ -58,6 +58,7 @@ APPWRITE_ENDPOINT = os.getenv("APPWRITE_ENDPOINT")
 APPWRITE_PROJECT_ID = os.getenv("APPWRITE_PROJECT_ID")
 APPWRITE_API_KEY = os.getenv("APPWRITE_API_KEY")
 DATABASE_ID = os.getenv("APPWRITE_DATABASE_ID", "default_mak_infratech_db")
+COLLECTION_STAFF = os.getenv("APPWRITE_STAFF_COLLECTION_ID", "staff")
 
 SESSION_SECRET = os.getenv("SESSION_SECRET", APPWRITE_API_KEY or "change-me-in-production")
 SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "mak_fms_session")
