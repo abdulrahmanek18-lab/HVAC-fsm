@@ -392,18 +392,18 @@ async def get_current_context(
 ) -> AuthContext:
     """
     Auth priority:
-    1. Optional Bearer Appwrite JWT for API clients.
-    2. Signed local HttpOnly cookie for browser sessions.
+   # 1. Optional Bearer Appwrite JWT for API clients.
+    1. Signed local HttpOnly cookie for browser sessions.
     """
-    bearer = extract_bearer_token(authorization)
+    # bearer = extract_bearer_token(authorization)
 
-    if bearer:
-        try:
-            return crud.resolve_auth_context(
-                jwt=bearer,
-                databases=databases,
-                users=users,
-                database_id=DATABASE_ID,
+   # if bearer:
+   #     try:
+   #         return crud.resolve_auth_context(
+   #             jwt=bearer,
+   #             data#bases=databases,
+   #             users=users,
+   #             database_id=DATABASE_ID,
             )
         except crud.AppError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
