@@ -209,7 +209,7 @@ def list_documents(
             queries=queries or [],
         )
         
-        # 1. Safely extract the documents array from the top-level object
+        # 1. Extract the documents container safely
         if hasattr(response, 'documents'):
             docs = response.documents
         elif isinstance(response, dict):
@@ -217,26 +217,48 @@ def list_documents(
         else:
             docs = []
 
-        # 2. Convert each Appwrite Document object into a plain Python dictionary
         cleaned_documents = []
         for doc in docs:
-            # Modern Pydantic (Appwrite's native object converter)
+            # Base dictionary initialization
+            doc_dict = {}
+            
+            # 2. Extract the user schema values safely using Pydantic methods
             if hasattr(doc, 'model_dump'):
-                cleaned_documents.append(doc.model_dump())
-            # Legacy Pydantic fallback
+                doc_dict = doc.model_dump()
             elif hasattr(doc, 'dict'):
-                cleaned_documents.append(doc.dict())
-            # Plain dictionary fallback
+                doc_dict = doc.dict()
             elif isinstance(doc, dict):
-                cleaned_documents.append(doc)
+                doc_dict = doc.copy()
             else:
-                cleaned_documents.append(getattr(doc, '__dict__', {}))
+                doc_dict = getattr(doc, '__dict__', {}).copy()
+
+            # 3. THE GOLDEN FIX: Manually map Appwrite's internal system fields
+            # If they aren't in the dict, pull them directly from the object attributes
+            system_fields = ["id", "collection_id", "database_id", "created_at", "updated_at", "permissions"]
+            for field in system_fields:
+                # Appwrite objects use standard snake_case attributes (e.g., doc.id)
+                if hasattr(doc, field):
+                    val = getattr(doc, field)
+                    # Convert internal keys back to Appwrite's standard $ format
+                    if field == "id":
+                        doc_dict["$id"] = val
+                    elif field == "collection_id":
+                        doc_dict["$collectionId"] = val
+                    elif field == "database_id":
+                        doc_dict["$databaseId"] = val
+                    elif field == "created_at":
+                        doc_dict["$createdAt"] = val
+                    elif field == "updated_at":
+                        doc_dict["$updatedAt"] = val
+                    elif field == "permissions":
+                        doc_dict["$permissions"] = val
+
+            cleaned_documents.append(doc_dict)
 
         return cleaned_documents
         
     except AppwriteException as exc:
         raise appwrite_error(exc) from exc
-
 def list_all_documents(
     databases: Databases,
     database_id: str,
