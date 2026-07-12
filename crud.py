@@ -314,9 +314,32 @@ def find_staff_for_user(
             collection_id=COLLECTION_STAFF,
             queries=[Query.equal("user_id", user_id), Query.limit(1)],
         )
+        # FIX: Safely unpack the Appwrite response whether it is an object or a dictionary
         if by_user_id:
-            return by_user_id[0]
+            if hasattr(by_user_id, 'documents') and by_user_id.documents:
+                return by_user_id.documents[0]
+            elif isinstance(by_user_id, dict) and by_user_id.get('documents'):
+                return by_user_id['documents'][0]
+            elif isinstance(by_user_id, list) and by_user_id:
+                return by_user_id[0]
 
+    if email:
+        by_email = list_documents(
+            databases=databases,
+            database_id=database_id,
+            collection_id=COLLECTION_STAFF,
+            queries=[Query.equal("email", email), Query.limit(1)],
+        )
+        # FIX: Safely unpack the Appwrite response whether it is an object or a dictionary
+        if by_email:
+            if hasattr(by_email, 'documents') and by_email.documents:
+                return by_email.documents[0]
+            elif isinstance(by_email, dict) and by_email.get('documents'):
+                return by_email['documents'][0]
+            elif isinstance(by_email, list) and by_email:
+                return by_email[0]
+
+    raise AppError("Staff record not found for this authenticated user", 404)
     if email:
         by_email = list_documents(
             databases=databases,
