@@ -203,17 +203,20 @@ def list_documents(
     queries: Optional[list[str]] = None,
 ) -> list[dict[str, Any]]:
     try:
-        response = databases.list_documents(
+        # Call list_rows instead of the deprecated list_documents method
+        response = databases.list_rows(
             database_id=database_id,
             collection_id=collection_id,
             queries=queries or [],
         )
         
-        # 1. Extract the documents container safely
-        if hasattr(response, 'documents'):
+        # Extract the rows container safely
+        if hasattr(response, 'rows'):
+            docs = response.rows
+        elif hasattr(response, 'documents'):
             docs = response.documents
         elif isinstance(response, dict):
-            docs = response.get("documents", [])
+            docs = response.get("rows", response.get("documents", []))
         else:
             docs = []
 
