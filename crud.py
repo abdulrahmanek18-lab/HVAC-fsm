@@ -208,10 +208,15 @@ def list_documents(
             collection_id=collection_id,
             queries=queries or [],
         )
-        return response.get("documents", [])
+        
+        # Extract the documents attribute safely
+        docs = response.documents if hasattr(response, 'documents') else response.get("documents", [])
+        
+        # Convert each document object into a standard dictionary so the rest of your app reads it perfectly
+        return [doc if isinstance(doc, dict) else doc.get("convertToYourType", doc.__dict__ if hasattr(doc, "__dict__") else dict(doc)) for doc in docs]
+        
     except AppwriteException as exc:
         raise appwrite_error(exc) from exc
-
 
 def list_all_documents(
     databases: Databases,
