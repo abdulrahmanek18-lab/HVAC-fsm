@@ -209,11 +209,30 @@ def list_documents(
             queries=queries or [],
         )
         
-        # Extract the documents attribute safely
-        docs = response.documents if hasattr(response, 'documents') else response.get("documents", [])
-        
-        # Convert each document object into a standard dictionary so the rest of your app reads it perfectly
-        return [doc if isinstance(doc, dict) else doc.get("convertToYourType", doc.__dict__ if hasattr(doc, "__dict__") else dict(doc)) for doc in docs]
+        # 1. Safely extract the documents array from the top-level object
+        if hasattr(response, 'documents'):
+            docs = response.documents
+        elif isinstance(response, dict):
+            docs = response.get("documents", [])
+        else:
+            docs = []
+
+        # 2. Convert each Appwrite Document object into a plain Python dictionary
+        cleaned_documents = []
+        for doc in docs:
+            # Modern Pydantic (Appwrite's native object converter)
+            if hasattr(doc, 'model_dump'):
+                cleaned_documents.append(doc.model_dump())
+            # Legacy Pydantic fallback
+            elif hasattr(doc, 'dict'):
+                cleaned_documents.append(doc.dict())
+            # Plain dictionary fallback
+            elif isinstance(doc, dict):
+                cleaned_documents.append(doc)
+            else:
+                cleaned_documents.append(getattr(doc, '__dict__', {}))
+
+        return cleaned_documents
         
     except AppwriteException as exc:
         raise appwrite_error(exc) from exc
