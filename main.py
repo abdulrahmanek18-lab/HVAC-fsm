@@ -57,7 +57,7 @@ APP_DEBUG = os.getenv("APP_DEBUG", "false").lower() == "true"
 APPWRITE_ENDPOINT = os.getenv("APPWRITE_ENDPOINT")
 APPWRITE_PROJECT_ID = os.getenv("APPWRITE_PROJECT_ID")
 APPWRITE_API_KEY = os.getenv("APPWRITE_API_KEY")
-DATABASE_ID = os.getenv("APPWRITE_DATABASE_ID", "default_mak_infratech_db")
+DATABASE_ID = os.getenv("APPWRITE_DATABASE_ID", "6a527d70000c330d1970")
 COLLECTION_STAFF = os.getenv("APPWRITE_STAFF_COLLECTION_ID", "staff")
 
 SESSION_SECRET = os.getenv("SESSION_SECRET", APPWRITE_API_KEY or "change-me-in-production")
