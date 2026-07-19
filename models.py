@@ -64,7 +64,8 @@ class AuthContext(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    jwt: str = Field(min_length=10)
+    username: str
+    password: str
 
 
 class LoginResponse(BaseModel):
