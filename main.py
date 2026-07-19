@@ -1,67 +1,89 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 import os
+from datetime import datetime, timezone
 from io import BytesIO
-from typing import Annotated, Any
+from typing import Annotated, Optional
 
 from appwrite.client import Client
-from appwrite.query import Query
 from appwrite.services.databases import Databases
+from appwrite.services.storage import Storage
 from appwrite.services.users import Users
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Cookie, Depends, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 
 import crud
 from models import (
-    ACUnitCreate,
-    ACUnitUpdateMetrics,
+    AppRole,
+    AssetCreate,
+    AssetUpdate,
+    AutomatedScheduleUpdate,
+    ContractCreate,
+    ContractUpdate,
+    LoginRequest,
+    MaintenanceLogCreate,
+    MaintenanceLogUpdate,
+    ScheduleType,
+    SettingsCreate,
+    SettingsUpdate,
+    StaffCreate,
+    StaffUpdate,
     AuthContext,
-    BarcodeParseRequest,
-    ClientCreate,
-    ClientUpdate,
-    ExpenseApprovalUpdate,
-    ExpenseCreate,
-    InvoiceCreate,
-    InvoiceStatusUpdate,
-    ServiceReportCreate,
-    ServiceReportUpdate,
 )
 
 load_dotenv()
 
-APP_NAME = os.getenv("APP_NAME", "HVAC Field Management System")
+
+# ============================================================
+# Environment / Appwrite Master Client
+# ============================================================
+
+APP_NAME = os.getenv("APP_NAME", "MAK INFRATECH Field Management")
 APP_ENV = os.getenv("APP_ENV", "production")
 APP_DEBUG = os.getenv("APP_DEBUG", "false").lower() == "true"
 
-required_env_vars = [
-    "APPWRITE_ENDPOINT",
-    "APPWRITE_PROJECT_ID",
-    "APPWRITE_API_KEY",
-]
+APPWRITE_ENDPOINT = os.getenv("APPWRITE_ENDPOINT")
+APPWRITE_PROJECT_ID = os.getenv("APPWRITE_PROJECT_ID")
+APPWRITE_API_KEY = os.getenv("APPWRITE_API_KEY")
+DATABASE_ID = os.getenv("APPWRITE_DATABASE_ID", "default_mak_infratech_db")
 
-missing_env_vars = [key for key in required_env_vars if not os.getenv(key)]
+SESSION_SECRET = os.getenv("SESSION_SECRET", APPWRITE_API_KEY or "change-me-in-production")
+SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "mak_fms_session")
+SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "true").lower() == "true"
 
-if missing_env_vars:
-    raise RuntimeError(
-        "Missing required environment variables: "
-        + ", ".join(missing_env_vars)
-    )
+required = {
+    "APPWRITE_ENDPOINT": APPWRITE_ENDPOINT,
+    "APPWRITE_PROJECT_ID": APPWRITE_PROJECT_ID,
+    "APPWRITE_API_KEY": APPWRITE_API_KEY,
+}
+
+missing = [key for key, value in required.items() if not value]
+if missing:
+    raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
 
 client = Client()
-client.set_endpoint(os.getenv("APPWRITE_ENDPOINT"))
-client.set_project(os.getenv("APPWRITE_PROJECT_ID"))
-client.set_key(os.getenv("APPWRITE_API_KEY"))
+client.set_endpoint(APPWRITE_ENDPOINT)
+client.set_project(APPWRITE_PROJECT_ID)
+client.set_key(APPWRITE_API_KEY)
 
 databases = Databases(client)
+storage = Storage(client)
 users = Users(client)
 
-DATABASE_ID = os.getenv("APPWRITE_DATABASE_ID", "default_hvac_db")
+
+# ============================================================
+# FastAPI App
+# ============================================================
 
 app = FastAPI(
     title=APP_NAME,
-    version="3.1.0-appwrite-scribus-local-pdf-dashboard",
+    version="4.0.0-production-rbac-appwrite-scribus",
     debug=APP_DEBUG,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -69,18 +91,22 @@ app = FastAPI(
 
 cors_origins = [
     origin.strip()
-    for origin in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:8000").split(",")
+    for origin in os.getenv("CORS_ORIGINS", "http://localhost:8000,http://localhost:3000").split(",")
     if origin.strip()
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cors_origins if cors_origins else ["*"],
+    allow_origins=cors_origins or ["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
+# ============================================================
+# Error Handling
+# ============================================================
 
 @app.exception_handler(crud.AppError)
 async def app_error_handler(_: Request, exc: crud.AppError) -> JSONResponse:
@@ -96,1004 +122,724 @@ async def app_error_handler(_: Request, exc: crud.AppError) -> JSONResponse:
 @app.exception_handler(Exception)
 async def unhandled_error_handler(_: Request, exc: Exception) -> JSONResponse:
     if APP_DEBUG:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "error": "Unhandled server error",
-                "details": str(exc),
-            },
-        )
+        return JSONResponse(status_code=500, content={"error": "Unhandled server error", "details": str(exc)})
+    return JSONResponse(status_code=500, content={"error": "Unhandled server error"})
 
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": "Unhandled server error",
-        },
+
+# ============================================================
+# Secure Signed Session Cookies
+# ============================================================
+
+def b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def b64url_decode(data: str) -> bytes:
+    padding = "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode(data + padding)
+
+
+def sign_payload(payload: dict) -> str:
+    body = b64url_encode(json.dumps(payload, separators=(",", ":"), default=str).encode())
+    signature = hmac.new(SESSION_SECRET.encode(), body.encode(), hashlib.sha256).digest()
+    return f"{body}.{b64url_encode(signature)}"
+
+
+def unsign_payload(token: str) -> dict:
+    try:
+        body, signature = token.split(".", 1)
+        expected = hmac.new(SESSION_SECRET.encode(), body.encode(), hashlib.sha256).digest()
+
+        if not hmac.compare_digest(b64url_decode(signature), expected):
+            raise ValueError("Invalid session signature")
+
+        payload = json.loads(b64url_decode(body).decode())
+        return payload
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid session") from exc
+
+
+def set_session_cookie(response: Response, ctx: AuthContext) -> None:
+    payload = {
+        "user_id": ctx.user_id,
+        "email": ctx.email,
+        "staff_id": ctx.staff_id,
+        "name": ctx.name,
+        "position": ctx.position.value,
+        "role": ctx.role.value,
+        "iat": int(datetime.now(timezone.utc).timestamp()),
+    }
+
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=sign_payload(payload),
+        httponly=True,
+        secure=SESSION_COOKIE_SECURE,
+        samesite="lax",
+        max_age=60 * 60 * 12,
+        path="/",
     )
 
 
-def extract_bearer_token(authorization: str | None) -> str:
+def clear_session_cookie(response: Response) -> None:
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+
+
+def extract_bearer_token(authorization: Optional[str]) -> Optional[str]:
     if not authorization:
-        raise HTTPException(status_code=401, detail="Authorization header missing")
+        return None
 
     prefix = "Bearer "
-
     if not authorization.startswith(prefix):
         raise HTTPException(status_code=401, detail="Authorization header must be Bearer token")
 
     token = authorization[len(prefix):].strip()
-
     if not token:
         raise HTTPException(status_code=401, detail="Bearer token is empty")
 
     return token
 
 
-async def get_auth_context(
-    authorization: Annotated[str | None, Header()] = None,
+async def get_current_context(
+    authorization: Annotated[Optional[str], Header()] = None,
+    session_cookie: Annotated[Optional[str], Cookie(alias=SESSION_COOKIE_NAME)] = None,
 ) -> AuthContext:
-    jwt = extract_bearer_token(authorization)
+    bearer = extract_bearer_token(authorization)
+
+    if bearer:
+        try:
+            return crud.resolve_auth_context(
+                jwt=bearer,
+                databases=databases,
+                users=users,
+                database_id=DATABASE_ID,
+            )
+        except crud.AppError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+    if session_cookie:
+        payload = unsign_payload(session_cookie)
+        return AuthContext(
+            user_id=payload["user_id"],
+            email=payload.get("email"),
+            staff_id=payload["staff_id"],
+            name=payload["name"],
+            position=payload["position"],
+            role=payload["role"],
+        )
+
+    raise HTTPException(status_code=401, detail="Authentication required")
+
+
+async def optional_context(
+    session_cookie: Annotated[Optional[str], Cookie(alias=SESSION_COOKIE_NAME)] = None,
+) -> Optional[AuthContext]:
+    if not session_cookie:
+        return None
 
     try:
-        return crud.resolve_auth_context(
-            jwt=jwt,
-            databases=databases,
-            users=users,
-            database_id=DATABASE_ID,
+        payload = unsign_payload(session_cookie)
+        return AuthContext(
+            user_id=payload["user_id"],
+            email=payload.get("email"),
+            staff_id=payload["staff_id"],
+            name=payload["name"],
+            position=payload["position"],
+            role=payload["role"],
         )
-    except crud.AppError as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail={
-                "error": exc.message,
-                "details": exc.details,
-            },
-        ) from exc
+    except Exception:
+        return None
 
 
-DASHBOARD_HTML = r"""
-<!doctype html>
-<html lang="en" class="scroll-smooth">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>MAK INFRATECH - Field Management</title>
+# ============================================================
+# Server-Rendered Tailwind UI
+# ============================================================
 
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {
-      theme: {
-        extend: {
-          fontFamily: {
-            sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif']
-          },
-          boxShadow: {
-            glow: '0 20px 80px rgba(59, 130, 246, 0.25)'
-          }
-        }
-      }
-    }
-  </script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+def shell_html(title: str, body: str, ctx: Optional[AuthContext] = None) -> str:
+    nav_links = ""
 
-  <style>
-    .glass {
-      background: rgba(255,255,255,0.78);
-      backdrop-filter: blur(18px);
-      -webkit-backdrop-filter: blur(18px);
-    }
-    .dark-glass {
-      background: rgba(15,23,42,0.74);
-      backdrop-filter: blur(18px);
-      -webkit-backdrop-filter: blur(18px);
-    }
-    .no-scrollbar::-webkit-scrollbar { display: none; }
-    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-  </style>
-</head>
+    if ctx:
+        nav_links = f"""
+        <a class="rounded-xl px-3 py-2 text-sm font-bold text-white/90 hover:bg-white/10" href="/">Dashboard</a>
+        <a class="rounded-xl px-3 py-2 text-sm font-bold text-white/90 hover:bg-white/10" href="/contracts">Contracts</a>
+        <a class="rounded-xl px-3 py-2 text-sm font-bold text-white/90 hover:bg-white/10" href="/technician">Technician</a>
+        <a class="rounded-xl px-3 py-2 text-sm font-bold text-white/90 hover:bg-white/10" href="/logout">Logout</a>
+        """
 
-<body class="min-h-screen bg-slate-950 font-sans text-slate-900">
-  <div class="fixed inset-0 -z-10 overflow-hidden">
-    <div class="absolute left-[-10%] top-[-10%] h-72 w-72 rounded-full bg-blue-500/30 blur-3xl"></div>
-    <div class="absolute right-[-10%] top-[10%] h-96 w-96 rounded-full bg-cyan-400/20 blur-3xl"></div>
-    <div class="absolute bottom-[-20%] left-[20%] h-[34rem] w-[34rem] rounded-full bg-indigo-500/20 blur-3xl"></div>
-    <div class="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(30,64,175,0.38),transparent_45%),linear-gradient(135deg,#020617,#0f172a_45%,#111827)]"></div>
-  </div>
-
-  <header class="sticky top-0 z-40 border-b border-white/10 dark-glass text-white">
-    <div class="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 sm:px-6 lg:px-8">
-      <div class="flex items-center gap-3">
-        <div class="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-cyan-400 to-blue-600 shadow-glow">
-          <span class="text-lg font-black text-white">MI</span>
-        </div>
-        <div>
-          <h1 class="text-sm font-black tracking-wide sm:text-lg">MAK INFRATECH</h1>
-          <p class="text-xs text-cyan-100/80">Field Management</p>
-        </div>
+    return f"""
+    <!doctype html>
+    <html lang="en" class="scroll-smooth">
+    <head>
+      <meta charset="utf-8"/>
+      <meta name="viewport" content="width=device-width, initial-scale=1"/>
+      <title>{title}</title>
+      <script src="https://cdn.tailwindcss.com"></script>
+      <script>
+        tailwind.config = {{
+          theme: {{
+            extend: {{
+              fontFamily: {{ sans: ['Inter','ui-sans-serif','system-ui'] }},
+              boxShadow: {{ glow: '0 20px 80px rgba(34,211,238,.25)' }}
+            }}
+          }}
+        }}
+      </script>
+      <link rel="preconnect" href="https://fonts.googleapis.com">
+      <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+      <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+      <style>
+        body {{ font-family: Inter, system-ui, sans-serif; }}
+        .glass {{ background: rgba(255,255,255,.82); backdrop-filter: blur(18px); }}
+        .darkglass {{ background: rgba(15,23,42,.78); backdrop-filter: blur(18px); }}
+      </style>
+    </head>
+    <body class="min-h-screen bg-slate-950 text-slate-900">
+      <div class="fixed inset-0 -z-10">
+        <div class="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,.25),transparent_38%),radial-gradient(circle_at_top_right,rgba(59,130,246,.24),transparent_38%),linear-gradient(135deg,#020617,#0f172a,#111827)]"></div>
       </div>
 
-      <nav class="hidden items-center gap-1 md:flex">
-        <button data-view="overview" class="nav-btn rounded-xl px-4 py-2 text-sm font-semibold text-white/90 hover:bg-white/10">Overview</button>
-        <button data-view="technician" class="nav-btn rounded-xl px-4 py-2 text-sm font-semibold text-white/90 hover:bg-white/10">Technician View</button>
-        <button data-view="assets" class="nav-btn rounded-xl px-4 py-2 text-sm font-semibold text-white/90 hover:bg-white/10">Assets</button>
-        <button data-view="financials" class="nav-btn rounded-xl px-4 py-2 text-sm font-semibold text-white/90 hover:bg-white/10">Financials</button>
-      </nav>
-
-      <div class="flex items-center gap-2">
-        <button id="tokenBtn" class="rounded-xl border border-cyan-300/30 bg-cyan-400/10 px-3 py-2 text-xs font-bold text-cyan-100 hover:bg-cyan-400/20 sm:px-4">
-          Connect Appwrite
-        </button>
-        <button id="mobileMenuBtn" class="rounded-xl bg-white/10 p-2 text-white md:hidden">
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7h16M4 12h16M4 17h16"/>
-          </svg>
-        </button>
-      </div>
-    </div>
-
-    <div id="mobileNav" class="hidden border-t border-white/10 px-4 pb-3 md:hidden">
-      <div class="grid grid-cols-2 gap-2 pt-3">
-        <button data-view="overview" class="nav-btn rounded-xl bg-white/10 px-3 py-2 text-sm font-semibold text-white">Overview</button>
-        <button data-view="technician" class="nav-btn rounded-xl bg-white/10 px-3 py-2 text-sm font-semibold text-white">Technician</button>
-        <button data-view="assets" class="nav-btn rounded-xl bg-white/10 px-3 py-2 text-sm font-semibold text-white">Assets</button>
-        <button data-view="financials" class="nav-btn rounded-xl bg-white/10 px-3 py-2 text-sm font-semibold text-white">Financials</button>
-      </div>
-    </div>
-  </header>
-
-  <main class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
-    <section class="mb-6 overflow-hidden rounded-[2rem] border border-white/10 bg-white/[0.07] p-5 text-white shadow-2xl sm:p-8">
-      <div class="grid gap-6 lg:grid-cols-[1.4fr_0.6fr] lg:items-center">
-        <div>
-          <div class="mb-4 inline-flex items-center gap-2 rounded-full border border-cyan-300/30 bg-cyan-300/10 px-3 py-1 text-xs font-bold text-cyan-100">
-            <span class="h-2 w-2 rounded-full bg-emerald-400"></span>
-            Live Operations Dashboard
+      <header class="sticky top-0 z-40 border-b border-white/10 darkglass">
+        <div class="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 sm:px-6 lg:px-8">
+          <a href="/" class="flex items-center gap-3">
+            <div class="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-cyan-400 to-blue-700 shadow-glow">
+              <span class="text-lg font-black text-white">MI</span>
+            </div>
+            <div>
+              <p class="text-sm font-black tracking-wide text-white sm:text-lg">MAK INFRATECH</p>
+              <p class="text-xs font-semibold text-cyan-100/80">Field Management System</p>
+            </div>
+          </a>
+          <nav class="hidden items-center gap-1 md:flex">{nav_links}</nav>
+          <div class="text-right text-xs text-slate-300">
+            {f'<p class="font-bold text-white">{ctx.name}</p><p>{ctx.role.value} · {ctx.position.value}</p>' if ctx else ''}
           </div>
-          <h2 class="max-w-3xl text-3xl font-black tracking-tight sm:text-5xl">
-            HVAC service control center for customers, assets, technicians, AMC and reports.
-          </h2>
-          <p class="mt-4 max-w-2xl text-sm leading-6 text-slate-200 sm:text-base">
-            Manage field work, scan assets, track maintenance complaints, create AMC schedules, and instantly download Scribus PDF service reports populated from Appwrite data.
-          </p>
-          <div class="mt-6 flex flex-col gap-3 sm:flex-row">
-            <button id="openAddModalHero" class="rounded-2xl bg-gradient-to-r from-cyan-400 to-blue-600 px-5 py-3 text-sm font-black text-white shadow-glow hover:scale-[1.01] active:scale-[0.99]">
-              Add New Customer / Asset
+        </div>
+      </header>
+
+      <main class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+        {body}
+      </main>
+    </body>
+    </html>
+    """
+
+
+def login_html() -> str:
+    return shell_html(
+        "Login - MAK INFRATECH",
+        """
+        <section class="mx-auto mt-10 max-w-xl rounded-[2rem] border border-white/10 bg-white p-6 shadow-2xl sm:p-8">
+          <div class="mb-6">
+            <p class="text-xs font-black uppercase tracking-[.25em] text-cyan-600">Secure Login</p>
+            <h1 class="mt-2 text-3xl font-black text-slate-950">MAK INFRATECH FMS</h1>
+            <p class="mt-2 text-sm leading-6 text-slate-600">
+              Paste an Appwrite JWT generated by your authenticated Appwrite client.
+              The backend validates it server-side and creates an HttpOnly session.
+            </p>
+          </div>
+
+          <form method="post" action="/login" class="space-y-4">
+            <div>
+              <label class="mb-1 block text-sm font-bold text-slate-700">Appwrite JWT</label>
+              <textarea name="jwt" required rows="6" class="w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none ring-cyan-500/20 focus:ring-4" placeholder="Paste JWT here"></textarea>
+            </div>
+            <button class="w-full rounded-2xl bg-gradient-to-r from-cyan-400 to-blue-700 px-5 py-3 text-sm font-black text-white shadow-glow">
+              Enter Dashboard
             </button>
-            <button data-view="technician" class="nav-btn rounded-2xl border border-white/15 bg-white/10 px-5 py-3 text-sm font-black text-white hover:bg-white/15">
-              Open Technician View
-            </button>
-          </div>
-        </div>
-
-        <div class="rounded-[1.75rem] border border-white/10 bg-slate-900/70 p-5">
-          <p class="text-xs font-bold uppercase tracking-[0.2em] text-cyan-200">Signed-in Profile</p>
-          <div class="mt-4 space-y-3">
-            <div>
-              <p class="text-xs text-slate-400">Name</p>
-              <p id="profileName" class="font-bold text-white">Not connected</p>
-            </div>
-            <div>
-              <p class="text-xs text-slate-400">Role</p>
-              <p id="profileRole" class="font-bold text-white">—</p>
-            </div>
-            <div>
-              <p class="text-xs text-slate-400">User ID</p>
-              <p id="profileId" class="break-all text-xs font-medium text-slate-300">—</p>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section id="overviewView" class="view-section">
-      <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <div class="glass rounded-[1.5rem] border border-white/60 p-5 shadow-xl">
-          <div class="flex items-center justify-between">
-            <p class="text-sm font-bold text-slate-500">Active Clients</p>
-            <span class="rounded-xl bg-blue-100 px-3 py-1 text-xs font-black text-blue-700">CRM</span>
-          </div>
-          <p id="statClients" class="mt-4 text-4xl font-black text-slate-950">—</p>
-          <p class="mt-2 text-xs text-slate-500">Walk-in and AMC customers</p>
-        </div>
-
-        <div class="glass rounded-[1.5rem] border border-white/60 p-5 shadow-xl">
-          <div class="flex items-center justify-between">
-            <p class="text-sm font-bold text-slate-500">Open Complaints</p>
-            <span class="rounded-xl bg-amber-100 px-3 py-1 text-xs font-black text-amber-700">Jobs</span>
-          </div>
-          <p id="statOpenReports" class="mt-4 text-4xl font-black text-slate-950">—</p>
-          <p class="mt-2 text-xs text-slate-500">Scheduled or in-progress reports</p>
-        </div>
-
-        <div class="glass rounded-[1.5rem] border border-white/60 p-5 shadow-xl">
-          <div class="flex items-center justify-between">
-            <p class="text-sm font-bold text-slate-500">AMC Contracts</p>
-            <span class="rounded-xl bg-emerald-100 px-3 py-1 text-xs font-black text-emerald-700">AMC</span>
-          </div>
-          <p id="statAmc" class="mt-4 text-4xl font-black text-slate-950">—</p>
-          <p class="mt-2 text-xs text-slate-500">Maintenance contracts tracked</p>
-        </div>
-
-        <div class="glass rounded-[1.5rem] border border-white/60 p-5 shadow-xl">
-          <div class="flex items-center justify-between">
-            <p class="text-sm font-bold text-slate-500">Assets Tracked</p>
-            <span class="rounded-xl bg-indigo-100 px-3 py-1 text-xs font-black text-indigo-700">AC Units</span>
-          </div>
-          <p id="statAssets" class="mt-4 text-4xl font-black text-slate-950">—</p>
-          <p class="mt-2 text-xs text-slate-500">Barcode-enabled equipment</p>
-        </div>
-      </div>
-
-      <div class="mt-6 grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
-        <div class="glass rounded-[2rem] border border-white/60 p-5 shadow-xl">
-          <div class="flex items-center justify-between">
-            <div>
-              <h3 class="text-lg font-black">Quick Actions</h3>
-              <p class="text-sm text-slate-500">Fast operational shortcuts</p>
-            </div>
-          </div>
-
-          <div class="mt-5 grid gap-3">
-            <button id="openAddModal" class="group flex items-center justify-between rounded-2xl bg-slate-950 px-5 py-4 text-left text-white shadow-xl hover:bg-slate-800">
-              <div>
-                <p class="font-black">Add New Customer / Asset</p>
-                <p class="text-xs text-slate-400">Create customer, AMC and AC unit barcode</p>
-              </div>
-              <span class="rounded-xl bg-cyan-400 px-3 py-2 text-sm font-black text-slate-950 group-hover:bg-cyan-300">Open</span>
-            </button>
-
-            <button data-view="technician" class="nav-btn group flex items-center justify-between rounded-2xl border border-slate-200 bg-white px-5 py-4 text-left hover:bg-slate-50">
-              <div>
-                <p class="font-black">Generate Scribus Service Report PDF</p>
-                <p class="text-xs text-slate-500">Select assigned report and download instantly</p>
-              </div>
-              <span class="rounded-xl bg-blue-100 px-3 py-2 text-sm font-black text-blue-700 group-hover:bg-blue-200">Go</span>
-            </button>
-          </div>
-        </div>
-
-        <div class="glass rounded-[2rem] border border-white/60 p-5 shadow-xl">
-          <div class="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-            <div>
-              <h3 class="text-lg font-black">Assigned Service Reports</h3>
-              <p class="text-sm text-slate-500">Live from Appwrite</p>
-            </div>
-            <button id="refreshBtn" class="rounded-xl bg-slate-950 px-4 py-2 text-sm font-bold text-white hover:bg-slate-800">
-              Refresh
-            </button>
-          </div>
-          <div id="reportsList" class="mt-5 max-h-[28rem] space-y-3 overflow-auto pr-1 no-scrollbar">
-            <div class="rounded-2xl border border-dashed border-slate-300 bg-white/60 p-5 text-sm text-slate-500">
-              Connect Appwrite and refresh to load assigned service reports.
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section id="technicianView" class="view-section hidden">
-      <div class="grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
-        <div class="glass rounded-[2rem] border border-white/60 p-5 shadow-xl">
-          <h3 class="text-xl font-black">Technician On-Site PDF Generator</h3>
-          <p class="mt-2 text-sm text-slate-600">
-            Choose your assigned service report, optionally update work notes, then download the populated local Scribus PDF.
-          </p>
-
-          <form id="techUpdateForm" class="mt-5 space-y-4">
-            <div>
-              <label class="mb-1 block text-sm font-bold text-slate-700">Service Report ID</label>
-              <input id="techReportId" type="text" required class="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none ring-blue-500/20 focus:ring-4" placeholder="Select from the list or paste report ID">
-            </div>
-
-            <div>
-              <label class="mb-1 block text-sm font-bold text-slate-700">Work Performed</label>
-              <textarea id="workPerformed" rows="4" class="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none ring-blue-500/20 focus:ring-4" placeholder="Describe repairs, cleaning, gas charging, electrical checks..."></textarea>
-            </div>
-
-            <div>
-              <label class="mb-1 block text-sm font-bold text-slate-700">Technician Observations</label>
-              <textarea id="techObservations" rows="4" class="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none ring-blue-500/20 focus:ring-4" placeholder="Site condition, spare parts needed, customer notes..."></textarea>
-            </div>
-
-            <div class="grid gap-3 sm:grid-cols-2">
-              <div>
-                <label class="mb-1 block text-sm font-bold text-slate-700">Pressure After Service</label>
-                <input id="pressureAfter" type="number" min="0" step="0.01" class="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none ring-blue-500/20 focus:ring-4" placeholder="e.g. 68">
-              </div>
-              <div>
-                <label class="mb-1 block text-sm font-bold text-slate-700">Ampere After Service</label>
-                <input id="ampereAfter" type="number" min="0" step="0.01" class="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none ring-blue-500/20 focus:ring-4" placeholder="e.g. 5.4">
-              </div>
-            </div>
-
-            <div>
-              <label class="mb-1 block text-sm font-bold text-slate-700">Status</label>
-              <select id="reportStatus" class="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none ring-blue-500/20 focus:ring-4">
-                <option value="">Do not change</option>
-                <option value="scheduled">Scheduled</option>
-                <option value="in_progress">In Progress</option>
-                <option value="completed">Completed</option>
-                <option value="cancelled">Cancelled</option>
-              </select>
-            </div>
-
-            <div class="grid gap-3 sm:grid-cols-2">
-              <button type="submit" class="rounded-2xl bg-slate-950 px-5 py-3 text-sm font-black text-white hover:bg-slate-800">
-                Save Field Notes
-              </button>
-              <button id="downloadPdfBtn" type="button" class="rounded-2xl bg-gradient-to-r from-cyan-400 to-blue-600 px-5 py-3 text-sm font-black text-white shadow-glow">
-                Download Scribus PDF
-              </button>
-            </div>
           </form>
-        </div>
+        </section>
+        """,
+    )
 
-        <div class="glass rounded-[2rem] border border-white/60 p-5 shadow-xl">
-          <div class="flex items-center justify-between">
-            <div>
-              <h3 class="text-xl font-black">Mobile Job Queue</h3>
-              <p class="text-sm text-slate-500">Tap a card to use it in the PDF form.</p>
-            </div>
-            <button id="refreshTechBtn" class="rounded-xl bg-blue-100 px-4 py-2 text-sm font-black text-blue-700">Reload</button>
-          </div>
-          <div id="techReportsList" class="mt-5 grid gap-3"></div>
-        </div>
+
+def stat_card(label: str, value: str, tone: str) -> str:
+    colors = {
+        "blue": "bg-blue-100 text-blue-700",
+        "cyan": "bg-cyan-100 text-cyan-700",
+        "emerald": "bg-emerald-100 text-emerald-700",
+        "amber": "bg-amber-100 text-amber-700",
+        "rose": "bg-rose-100 text-rose-700",
+        "indigo": "bg-indigo-100 text-indigo-700",
+    }
+    return f"""
+    <div class="glass rounded-[1.5rem] border border-white/60 p-5 shadow-xl">
+      <div class="flex items-center justify-between">
+        <p class="text-sm font-bold text-slate-500">{label}</p>
+        <span class="rounded-xl px-3 py-1 text-xs font-black {colors.get(tone, colors['blue'])}">LIVE</span>
       </div>
-    </section>
-
-    <section id="assetsView" class="view-section hidden">
-      <div class="glass rounded-[2rem] border border-white/60 p-5 shadow-xl">
-        <div class="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-          <div>
-            <h3 class="text-xl font-black">Asset Barcode Tools</h3>
-            <p class="text-sm text-slate-500">Parse HVAC barcode text and locate AC unit records.</p>
-          </div>
-          <button id="openAddModalAssets" class="rounded-xl bg-slate-950 px-4 py-2 text-sm font-bold text-white">Add Asset</button>
-        </div>
-
-        <div class="mt-5 grid gap-4 lg:grid-cols-[1fr_1fr]">
-          <div class="rounded-2xl border border-slate-200 bg-white p-4">
-            <label class="mb-1 block text-sm font-bold text-slate-700">Barcode Value</label>
-            <input id="barcodeInput" class="w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none ring-blue-500/20 focus:ring-4" placeholder="HVAC:clientId:UNIT-01:uuid">
-            <button id="parseBarcodeBtn" class="mt-3 w-full rounded-2xl bg-blue-600 px-4 py-3 text-sm font-black text-white">Parse / Find Asset</button>
-          </div>
-          <pre id="barcodeResult" class="min-h-48 overflow-auto rounded-2xl bg-slate-950 p-4 text-xs text-cyan-100">Barcode result will appear here.</pre>
-        </div>
-      </div>
-    </section>
-
-    <section id="financialsView" class="view-section hidden">
-      <div class="glass rounded-[2rem] border border-white/60 p-5 shadow-xl">
-        <h3 class="text-xl font-black">Financial Operations</h3>
-        <p class="mt-2 text-sm text-slate-600">
-          Invoices and expenses are available through the API routes. Use this panel as a quick reference for connected modules.
-        </p>
-
-        <div class="mt-5 grid gap-4 md:grid-cols-2">
-          <div class="rounded-2xl bg-white p-5">
-            <p class="text-sm font-black text-slate-500">Invoices</p>
-            <p class="mt-2 text-2xl font-black">Client + Job Linked</p>
-            <p class="mt-2 text-sm text-slate-500">Create invoices using <code class="rounded bg-slate-100 px-1">POST /invoices</code></p>
-          </div>
-          <div class="rounded-2xl bg-white p-5">
-            <p class="text-sm font-black text-slate-500">Expenses</p>
-            <p class="mt-2 text-2xl font-black">Field Cost Tracking</p>
-            <p class="mt-2 text-sm text-slate-500">Submit expenses using <code class="rounded bg-slate-100 px-1">POST /expenses</code></p>
-          </div>
-        </div>
-      </div>
-    </section>
-  </main>
-
-  <div id="addModal" class="fixed inset-0 z-50 hidden overflow-y-auto bg-slate-950/70 p-4 backdrop-blur-sm">
-    <div class="mx-auto my-6 max-w-4xl rounded-[2rem] bg-white shadow-2xl">
-      <div class="flex items-center justify-between border-b border-slate-100 p-5">
-        <div>
-          <h3 class="text-xl font-black">Add New Customer / Asset</h3>
-          <p class="text-sm text-slate-500">Creates a customer first, then optionally creates an AC unit asset.</p>
-        </div>
-        <button id="closeAddModal" class="rounded-xl bg-slate-100 px-3 py-2 text-sm font-black text-slate-700">Close</button>
-      </div>
-
-      <form id="addCustomerAssetForm" class="p-5">
-        <div class="grid gap-5 lg:grid-cols-2">
-          <div class="space-y-4">
-            <h4 class="font-black text-slate-900">Customer Details</h4>
-
-            <div class="grid gap-3 sm:grid-cols-2">
-              <div>
-                <label class="mb-1 block text-sm font-bold">Customer Type</label>
-                <select id="customerType" class="form-input w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm">
-                  <option value="walk_in">Walk-in</option>
-                  <option value="amc">AMC</option>
-                </select>
-              </div>
-              <div>
-                <label class="mb-1 block text-sm font-bold">Name</label>
-                <input id="customerName" required class="form-input w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm">
-              </div>
-            </div>
-
-            <div class="grid gap-3 sm:grid-cols-2">
-              <div>
-                <label class="mb-1 block text-sm font-bold">Phone</label>
-                <input id="customerPhone" required class="form-input w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm">
-              </div>
-              <div>
-                <label class="mb-1 block text-sm font-bold">Email</label>
-                <input id="customerEmail" type="email" class="form-input w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm">
-              </div>
-            </div>
-
-            <div>
-              <label class="mb-1 block text-sm font-bold">Address Line 1</label>
-              <input id="addressLine1" required class="form-input w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm">
-            </div>
-
-            <div>
-              <label class="mb-1 block text-sm font-bold">Address Line 2</label>
-              <input id="addressLine2" class="form-input w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm">
-            </div>
-
-            <div class="grid gap-3 sm:grid-cols-3">
-              <div>
-                <label class="mb-1 block text-sm font-bold">City</label>
-                <input id="city" required class="form-input w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm">
-              </div>
-              <div>
-                <label class="mb-1 block text-sm font-bold">State</label>
-                <input id="state" required class="form-input w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm">
-              </div>
-              <div>
-                <label class="mb-1 block text-sm font-bold">Flat No.</label>
-                <input id="flatNumber" class="form-input w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm">
-              </div>
-            </div>
-
-            <div id="amcFields" class="hidden rounded-2xl bg-slate-50 p-4">
-              <h5 class="mb-3 font-black">AMC Details</h5>
-              <div class="grid gap-3 sm:grid-cols-2">
-                <div>
-                  <label class="mb-1 block text-sm font-bold">Start Date</label>
-                  <input id="contractStart" type="date" class="form-input w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm">
-                </div>
-                <div>
-                  <label class="mb-1 block text-sm font-bold">End Date</label>
-                  <input id="contractEnd" type="date" class="form-input w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm">
-                </div>
-                <div>
-                  <label class="mb-1 block text-sm font-bold">Contract Value</label>
-                  <input id="contractValue" type="number" min="0" step="0.01" class="form-input w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm">
-                </div>
-                <div>
-                  <label class="mb-1 block text-sm font-bold">EMI Count</label>
-                  <input id="emiCount" type="number" min="1" value="1" class="form-input w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm">
-                </div>
-                <div>
-                  <label class="mb-1 block text-sm font-bold">PPM Count</label>
-                  <input id="ppmCount" type="number" min="0" value="0" class="form-input w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm">
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="space-y-4">
-            <h4 class="font-black text-slate-900">Asset Details</h4>
-
-            <div class="rounded-2xl bg-blue-50 p-4 text-sm text-blue-800">
-              Leave asset fields blank if you only want to create a customer.
-            </div>
-
-            <div>
-              <label class="mb-1 block text-sm font-bold">Assigned Unit Number</label>
-              <input id="unitNumber" class="form-input w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm" placeholder="UNIT-01">
-            </div>
-
-            <div class="grid gap-3 sm:grid-cols-2">
-              <div>
-                <label class="mb-1 block text-sm font-bold">AC Brand</label>
-                <select id="brand" class="form-input w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm">
-                  <option value="Daikin">Daikin</option>
-                  <option value="Carrier">Carrier</option>
-                  <option value="LG">LG</option>
-                  <option value="Samsung">Samsung</option>
-                  <option value="Voltas">Voltas</option>
-                  <option value="Blue Star">Blue Star</option>
-                  <option value="Hitachi">Hitachi</option>
-                  <option value="Panasonic">Panasonic</option>
-                  <option value="Mitsubishi">Mitsubishi</option>
-                  <option value="O General">O General</option>
-                  <option value="Other">Other</option>
-                </select>
-              </div>
-              <div>
-                <label class="mb-1 block text-sm font-bold">Refrigerant Type</label>
-                <select id="refrigerant" class="form-input w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm">
-                  <option value="R22">R22</option>
-                  <option value="R32">R32</option>
-                  <option value="R410A">R410A</option>
-                  <option value="R134A">R134A</option>
-                  <option value="R290">R290</option>
-                  <option value="R407C">R407C</option>
-                  <option value="Other">Other</option>
-                </select>
-              </div>
-            </div>
-
-            <div class="grid gap-3 sm:grid-cols-2">
-              <div>
-                <label class="mb-1 block text-sm font-bold">Pressure</label>
-                <input id="pressure" type="number" min="0" step="0.01" class="form-input w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm">
-              </div>
-              <div>
-                <label class="mb-1 block text-sm font-bold">Ampere</label>
-                <input id="ampere" type="number" min="0" step="0.01" class="form-input w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm">
-              </div>
-            </div>
-
-            <div>
-              <label class="mb-1 block text-sm font-bold">Condition</label>
-              <select id="condition" class="form-input w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm">
-                <option value="excellent">Excellent</option>
-                <option value="good" selected>Good</option>
-                <option value="fair">Fair</option>
-                <option value="poor">Poor</option>
-                <option value="needs_repair">Needs Repair</option>
-                <option value="not_working">Not Working</option>
-              </select>
-            </div>
-
-            <div>
-              <label class="mb-1 block text-sm font-bold">Location Description</label>
-              <textarea id="locationDescription" rows="3" class="form-input w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm" placeholder="Living room, server room, roof unit..."></textarea>
-            </div>
-
-            <pre id="addResult" class="max-h-48 overflow-auto rounded-2xl bg-slate-950 p-4 text-xs text-cyan-100">Submission result will appear here.</pre>
-          </div>
-        </div>
-
-        <div class="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-end">
-          <button type="button" id="resetAddForm" class="rounded-2xl border border-slate-200 px-5 py-3 text-sm font-black">Reset</button>
-          <button type="submit" class="rounded-2xl bg-gradient-to-r from-cyan-400 to-blue-600 px-5 py-3 text-sm font-black text-white shadow-glow">Create Customer / Asset</button>
-        </div>
-      </form>
+      <p class="mt-4 text-4xl font-black text-slate-950">{value}</p>
     </div>
-  </div>
+    """
 
-  <div id="toast" class="fixed bottom-4 left-1/2 z-[60] hidden w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 rounded-2xl bg-slate-950 px-5 py-4 text-sm font-semibold text-white shadow-2xl"></div>
 
-  <script>
-    const state = {
-      token: localStorage.getItem('mak_appwrite_jwt') || '',
-      me: null,
-      reports: []
-    };
+def admin_dashboard(ctx: AuthContext) -> str:
+    stats = crud.dashboard_stats(databases, DATABASE_ID, ctx)
+    alerts = crud.get_staff_compliance_alerts(databases, DATABASE_ID)
 
-    const $ = (id) => document.getElementById(id);
+    alert_html = ""
+    if alerts:
+        alert_rows = "".join(
+            f"""
+            <div class="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+              <p class="font-black text-amber-900">{a.staff_name} · {a.document_type}</p>
+              <p class="text-sm text-amber-800">Expires on {a.expiry_date.isoformat()} · {a.days_remaining} days remaining</p>
+            </div>
+            """
+            for a in alerts
+        )
+        alert_html = f"""
+        <section class="mb-6 rounded-[2rem] border border-amber-300 bg-amber-100/90 p-5 shadow-xl">
+          <h2 class="text-xl font-black text-amber-950">Critical HR Compliance Expiry Alerts</h2>
+          <div class="mt-4 grid gap-3 md:grid-cols-2">{alert_rows}</div>
+        </section>
+        """
 
-    function toast(message, kind = 'info') {
-      const el = $('toast');
-      el.textContent = message;
-      el.className = 'fixed bottom-4 left-1/2 z-[60] w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 rounded-2xl px-5 py-4 text-sm font-semibold text-white shadow-2xl';
-      if (kind === 'error') el.classList.add('bg-rose-600');
-      else if (kind === 'success') el.classList.add('bg-emerald-600');
-      else el.classList.add('bg-slate-950');
-      el.classList.remove('hidden');
-      setTimeout(() => el.classList.add('hidden'), 4200);
-    }
+    return f"""
+    {alert_html}
+    <section class="mb-6 rounded-[2rem] border border-white/10 bg-white/[.08] p-6 text-white shadow-2xl">
+      <p class="text-xs font-black uppercase tracking-[.25em] text-cyan-200">Admin Command Center</p>
+      <h1 class="mt-2 text-3xl font-black sm:text-5xl">Full telemetry, finance, HR and technical operations.</h1>
+      <p class="mt-3 max-w-3xl text-sm text-slate-200">This Admin view includes business metrics, VAT/TRN settings, staff payroll, compliance and operational maintenance visibility.</p>
+    </section>
 
-    function headers(json = true) {
-      const h = {};
-      if (json) h['Content-Type'] = 'application/json';
-      if (state.token) h['Authorization'] = `Bearer ${state.token}`;
-      return h;
-    }
+    <section class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      {stat_card("Active Contracts", str(stats["active_contracts"]), "blue")}
+      {stat_card("Pending EMIs", str(stats["pending_emis"]), "emerald")}
+      {stat_card("Pending PPMs", str(stats["pending_ppms"]), "amber")}
+      {stat_card("Assets Tracked", str(stats["assets_tracked"]), "indigo")}
+    </section>
 
-    async function api(path, options = {}) {
-      const response = await fetch(path, {
-        ...options,
-        headers: {
-          ...headers(options.body !== undefined && !(options.body instanceof FormData)),
-          ...(options.headers || {})
-        }
-      });
-
-      const contentType = response.headers.get('content-type') || '';
-      if (!response.ok) {
-        let err;
-        if (contentType.includes('application/json')) {
-          err = await response.json();
-        } else {
-          err = { error: await response.text() };
-        }
-        throw new Error(err.error || err.detail?.error || err.detail || response.statusText);
-      }
-
-      if (contentType.includes('application/json')) return response.json();
-      return response;
-    }
-
-    function setView(name) {
-      document.querySelectorAll('.view-section').forEach(el => el.classList.add('hidden'));
-      const target = $(`${name}View`);
-      if (target) target.classList.remove('hidden');
-
-      document.querySelectorAll('.nav-btn').forEach(btn => {
-        if (btn.dataset.view === name) {
-          btn.classList.add('bg-white/15');
-        } else {
-          btn.classList.remove('bg-white/15');
-        }
-      });
-
-      if (name === 'technician') loadReports();
-      if (name === 'overview') loadDashboard();
-    }
-
-    async function connectToken() {
-      const existing = state.token || '';
-      const token = prompt(
-        'Paste your Appwrite JWT generated from account.createJWT() in your frontend/client:',
-        existing
-      );
-
-      if (token === null) return;
-
-      state.token = token.trim();
-      localStorage.setItem('mak_appwrite_jwt', state.token);
-
-      if (!state.token) {
-        toast('Token cleared.', 'info');
-        return;
-      }
-
-      await loadMe();
-      await loadDashboard();
-      await loadReports();
-    }
-
-    async function loadMe() {
-      if (!state.token) {
-        $('profileName').textContent = 'Not connected';
-        $('profileRole').textContent = '—';
-        $('profileId').textContent = '—';
-        return;
-      }
-
-      try {
-        const me = await api('/me');
-        state.me = me;
-        $('profileName').textContent = me.full_name || '—';
-        $('profileRole').textContent = me.role || '—';
-        $('profileId').textContent = me.user_id || '—';
-        $('tokenBtn').textContent = 'Connected';
-      } catch (err) {
-        $('tokenBtn').textContent = 'Connect Appwrite';
-        toast(`Connection failed: ${err.message}`, 'error');
-      }
-    }
-
-    async function loadDashboard() {
-      if (!state.token) return;
-
-      try {
-        const stats = await api('/dashboard/stats');
-        $('statClients').textContent = stats.active_clients;
-        $('statOpenReports').textContent = stats.open_maintenance_complaints;
-        $('statAmc').textContent = stats.amc_contracts;
-        $('statAssets').textContent = stats.total_assets_tracked;
-      } catch (err) {
-        toast(`Stats failed: ${err.message}`, 'error');
-      }
-    }
-
-    function reportCard(report, compact = false) {
-      const client = report.client || {};
-      const unit = report.ac_unit || {};
-      const statusColor = report.status === 'completed'
-        ? 'bg-emerald-100 text-emerald-700'
-        : report.status === 'in_progress'
-          ? 'bg-blue-100 text-blue-700'
-          : report.status === 'cancelled'
-            ? 'bg-rose-100 text-rose-700'
-            : 'bg-amber-100 text-amber-700';
-
-      const div = document.createElement('div');
-      div.className = 'rounded-2xl border border-slate-200 bg-white p-4 shadow-sm';
-      div.innerHTML = `
-        <div class="flex items-start justify-between gap-3">
-          <div>
-            <p class="text-xs font-black uppercase tracking-wider text-slate-400">${report.report_number || report.$id}</p>
-            <h4 class="mt-1 text-base font-black text-slate-950">${client.name || 'Client unavailable'}</h4>
-            <p class="mt-1 text-xs text-slate-500">${report.nature_of_complaint || ''}</p>
+    <section class="mt-6 grid gap-6 lg:grid-cols-2">
+      <div class="glass rounded-[2rem] border border-white/60 p-5 shadow-xl">
+        <h2 class="text-xl font-black">Financial Summary</h2>
+        <div class="mt-4 grid gap-3 sm:grid-cols-2">
+          <div class="rounded-2xl bg-slate-950 p-5 text-white">
+            <p class="text-sm text-slate-400">Total Contract Value</p>
+            <p class="mt-2 text-3xl font-black">AED {stats.get("contract_value_total", 0):,.2f}</p>
           </div>
-          <span class="shrink-0 rounded-xl px-3 py-1 text-xs font-black ${statusColor}">${report.status || 'scheduled'}</span>
+          <div class="rounded-2xl bg-emerald-600 p-5 text-white">
+            <p class="text-sm text-emerald-100">Pending EMI Amount</p>
+            <p class="mt-2 text-3xl font-black">AED {stats.get("pending_emi_amount", 0):,.2f}</p>
+          </div>
         </div>
-        <div class="mt-3 grid gap-2 text-xs text-slate-600 sm:grid-cols-2">
-          <p><span class="font-bold">Scheduled:</span> ${report.scheduled_at || '—'}</p>
-          <p><span class="font-bold">Technician:</span> ${report.assigned_technician_name || '—'}</p>
-          <p><span class="font-bold">Unit:</span> ${unit.unit_number || '—'}</p>
-          <p><span class="font-bold">Brand:</span> ${unit.brand || '—'}</p>
+      </div>
+
+      <div class="glass rounded-[2rem] border border-white/60 p-5 shadow-xl">
+        <h2 class="text-xl font-black">Quick Admin Actions</h2>
+        <div class="mt-4 grid gap-3">
+          <a href="/contracts" class="rounded-2xl bg-slate-950 px-5 py-4 font-black text-white">Create / Manage Contracts</a>
+          <a href="/technician" class="rounded-2xl bg-blue-600 px-5 py-4 font-black text-white">Open Technician Console</a>
+          <a href="/docs" class="rounded-2xl border border-slate-200 bg-white px-5 py-4 font-black text-slate-900">API Documentation</a>
         </div>
-        <div class="mt-4 flex flex-col gap-2 sm:flex-row">
-          <button data-report-id="${report.$id}" class="select-report-btn rounded-xl bg-slate-950 px-4 py-2 text-xs font-black text-white">Use in Technician Form</button>
-          <button data-report-id="${report.$id}" class="download-report-btn rounded-xl bg-blue-600 px-4 py-2 text-xs font-black text-white">Download PDF</button>
+      </div>
+    </section>
+    """
+
+
+def accountant_dashboard(ctx: AuthContext) -> str:
+    stats = crud.dashboard_stats(databases, DATABASE_ID, ctx)
+    settings = crud.get_settings(databases, DATABASE_ID)
+
+    return f"""
+    <section class="mb-6 rounded-[2rem] border border-white/10 bg-white/[.08] p-6 text-white shadow-2xl">
+      <p class="text-xs font-black uppercase tracking-[.25em] text-cyan-200">Accountant Matrix</p>
+      <h1 class="mt-2 text-3xl font-black sm:text-5xl">Financial contracts, EMI collections, VAT and payroll.</h1>
+      <p class="mt-3 text-sm text-slate-200">Technical equipment parameters are hidden from this view by server-side rendering.</p>
+    </section>
+
+    <section class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      {stat_card("Active Contracts", str(stats["active_contracts"]), "blue")}
+      {stat_card("Pending EMIs", str(stats["pending_emis"]), "emerald")}
+      {stat_card("Total Contract Value", f'AED {stats.get("contract_value_total", 0):,.2f}', "indigo")}
+      {stat_card("Pending EMI Amount", f'AED {stats.get("pending_emi_amount", 0):,.2f}', "amber")}
+    </section>
+
+    <section class="mt-6 grid gap-6 lg:grid-cols-2">
+      <div class="glass rounded-[2rem] border border-white/60 p-5 shadow-xl">
+        <h2 class="text-xl font-black">Tax Settings</h2>
+        <form method="post" action="/ui/settings" class="mt-4 space-y-3">
+          <input name="company_name" value="{settings.get("company_name", "")}" class="w-full rounded-2xl border border-slate-200 px-4 py-3" placeholder="Company Name">
+          <input name="trn_number" value="{settings.get("trn_number", "")}" class="w-full rounded-2xl border border-slate-200 px-4 py-3" placeholder="TRN Number">
+          <input name="vat_percentage" type="number" step="0.01" value="{settings.get("vat_percentage", 5.0)}" class="w-full rounded-2xl border border-slate-200 px-4 py-3" placeholder="VAT %">
+          <button class="rounded-2xl bg-slate-950 px-5 py-3 font-black text-white">Save VAT/TRN</button>
+        </form>
+      </div>
+
+      <div class="glass rounded-[2rem] border border-white/60 p-5 shadow-xl">
+        <h2 class="text-xl font-black">Financial Actions</h2>
+        <div class="mt-4 grid gap-3">
+          <a href="/contracts" class="rounded-2xl bg-slate-950 px-5 py-4 font-black text-white">View Contract Values & EMI Schedules</a>
+          <a href="/api/schedules?type=EMI" class="rounded-2xl bg-emerald-600 px-5 py-4 font-black text-white">EMI API Feed</a>
         </div>
-      `;
+      </div>
+    </section>
+    """
 
-      div.querySelector('.select-report-btn').addEventListener('click', () => {
-        $('techReportId').value = report.$id;
-        setView('technician');
-        toast('Report selected for technician form.', 'success');
-      });
 
-      div.querySelector('.download-report-btn').addEventListener('click', () => downloadPdf(report.$id));
+def technician_dashboard(ctx: AuthContext) -> str:
+    contracts = crud.list_contracts(databases, DATABASE_ID, ctx)
 
-      return div;
-    }
+    options = "".join(
+        f'<option value="{c["$id"]}">{c.get("building_villa_name")} · {c.get("customer_name")}</option>'
+        for c in contracts
+    )
 
-    async function loadReports() {
-      if (!state.token) return;
+    return f"""
+    <section class="mb-6 rounded-[2rem] border border-white/10 bg-white/[.08] p-5 text-white shadow-2xl">
+      <p class="text-xs font-black uppercase tracking-[.25em] text-cyan-200">Technician Mobile Console</p>
+      <h1 class="mt-2 text-3xl font-black">On-site maintenance logging</h1>
+      <p class="mt-3 text-sm text-slate-200">Cost structures, revenue, salaries and contract values are stripped out server-side.</p>
+    </section>
 
-      try {
-        const reports = await api('/service-reports/assigned');
-        state.reports = reports || [];
+    <section class="grid gap-6 lg:grid-cols-[.9fr_1.1fr]">
+      <div class="glass rounded-[2rem] border border-white/60 p-5 shadow-xl">
+        <h2 class="text-xl font-black">Select Site</h2>
+        <select id="contractSelect" class="mt-4 w-full rounded-2xl border border-slate-200 px-4 py-3">
+          <option value="">Choose building / villa</option>
+          {options}
+        </select>
 
-        const list = $('reportsList');
-        const techList = $('techReportsList');
-        list.innerHTML = '';
-        techList.innerHTML = '';
+        <button onclick="loadAssets()" class="mt-3 w-full rounded-2xl bg-slate-950 px-5 py-3 font-black text-white">
+          Load Flats & Units
+        </button>
 
-        if (!state.reports.length) {
-          list.innerHTML = '<div class="rounded-2xl border border-dashed border-slate-300 bg-white/60 p-5 text-sm text-slate-500">No assigned reports found.</div>';
-          techList.innerHTML = '<div class="rounded-2xl border border-dashed border-slate-300 bg-white/60 p-5 text-sm text-slate-500">No assigned reports found.</div>';
+        <button onclick="downloadPdf()" class="mt-3 w-full rounded-2xl bg-gradient-to-r from-cyan-400 to-blue-700 px-5 py-3 font-black text-white shadow-glow">
+          Generate Scribus PPM PDF
+        </button>
+      </div>
+
+      <div class="glass rounded-[2rem] border border-white/60 p-5 shadow-xl">
+        <h2 class="text-xl font-black">Multi-Asset Technical Input Grid</h2>
+        <div id="assetGrid" class="mt-4 space-y-4">
+          <div class="rounded-2xl border border-dashed border-slate-300 bg-white/60 p-5 text-sm text-slate-500">
+            Select a site and load assets.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <script>
+      async function api(path, options = {{}}) {{
+        const res = await fetch(path, options);
+        if (!res.ok) {{
+          let msg = res.statusText;
+          try {{ const e = await res.json(); msg = e.error || e.detail || msg; }} catch (_) {{}}
+          alert(msg);
+          throw new Error(msg);
+        }}
+        return res.json();
+      }}
+
+      async function loadAssets() {{
+        const contractId = document.getElementById('contractSelect').value;
+        if (!contractId) return alert('Select a site');
+
+        const assets = await api(`/api/assets?contract_id=${{encodeURIComponent(contractId)}}`);
+        const grid = document.getElementById('assetGrid');
+        grid.innerHTML = '';
+
+        if (!assets.length) {{
+          grid.innerHTML = '<div class="rounded-2xl border border-dashed border-slate-300 bg-white/60 p-5 text-sm text-slate-500">No assets found.</div>';
           return;
-        }
+        }}
 
-        state.reports.forEach(report => {
-          list.appendChild(reportCard(report));
-          techList.appendChild(reportCard(report, true));
-        });
-      } catch (err) {
-        toast(`Reports failed: ${err.message}`, 'error');
-      }
-    }
+        for (const asset of assets) {{
+          const card = document.createElement('div');
+          card.className = 'rounded-2xl border border-slate-200 bg-white p-4';
+          card.innerHTML = `
+            <div class="flex items-start justify-between gap-3">
+              <div>
+                <p class="text-xs font-black text-slate-400">${{asset.unit_type || ''}}</p>
+                <h3 class="text-lg font-black">${{asset.flat_villa_no || ''}} · ${{asset.brand || ''}}</h3>
+                <p class="text-xs text-slate-500">Serial: ${{asset.serial_no || '—'}}</p>
+              </div>
+            </div>
 
-    async function downloadPdf(reportId) {
-      if (!reportId) {
-        toast('Service Report ID is required.', 'error');
-        return;
-      }
+            <form class="mt-4 space-y-3" onsubmit="submitLog(event, '${{asset.$id}}')">
+              <select name="work_category" class="w-full rounded-xl border px-3 py-2">
+                <option value="HVAC">HVAC</option>
+                <option value="Electrical">Electrical</option>
+                <option value="Plumbing">Plumbing</option>
+                <option value="Painting">Painting</option>
+              </select>
 
-      try {
-        const response = await fetch(`/service-reports/${encodeURIComponent(reportId)}/pdf`, {
-          headers: headers(false)
-        });
+              <textarea name="job_description" required rows="2" class="w-full rounded-xl border px-3 py-2" placeholder="Job description"></textarea>
 
-        if (!response.ok) {
-          let message = response.statusText;
-          try {
-            const err = await response.json();
-            message = err.error || err.detail?.error || err.detail || message;
-          } catch (_) {}
-          throw new Error(message);
-        }
+              <div class="grid grid-cols-3 gap-2">
+                <input name="suction_pressure" type="number" step="0.01" class="rounded-xl border px-3 py-2" placeholder="Suction">
+                <input name="discharge_pressure" type="number" step="0.01" class="rounded-xl border px-3 py-2" placeholder="Discharge">
+                <input name="ampere_reading" type="number" step="0.01" class="rounded-xl border px-3 py-2" placeholder="Ampere">
+              </div>
 
-        const blob = await response.blob();
-        const disposition = response.headers.get('content-disposition') || '';
-        const match = disposition.match(/filename="([^"]+)"/);
-        const filename = match ? match[1] : `service-report-${reportId}.pdf`;
+              <textarea name="materials_used" rows="2" class="w-full rounded-xl border px-3 py-2" placeholder="Materials used"></textarea>
 
-        const url = window.URL.createObjectURL(blob);
+              <div class="rounded-xl bg-slate-50 p-3 text-sm">
+                <p class="font-black">Checklist</p>
+                <label class="mt-2 block"><input type="checkbox" name="hvac_checklist" value="Filter cleaned"> Filter cleaned</label>
+                <label class="block"><input type="checkbox" name="hvac_checklist" value="Drain checked"> Drain checked</label>
+                <label class="block"><input type="checkbox" name="electrical_checklist" value="Breaker checked"> Breaker checked</label>
+                <label class="block"><input type="checkbox" name="plumbing_checklist" value="Leakage checked"> Leakage checked</label>
+                <label class="block"><input type="checkbox" name="painting_checklist" value="Touch-up required"> Touch-up required</label>
+              </div>
+
+              <input name="image" type="file" accept="image/*,application/pdf" class="w-full rounded-xl border px-3 py-2">
+
+              <button class="w-full rounded-xl bg-blue-600 px-4 py-3 font-black text-white">Save Maintenance Log</button>
+            </form>
+          `;
+          grid.appendChild(card);
+        }}
+      }}
+
+      function checklistValues(form, name) {{
+        return Array.from(form.querySelectorAll(`input[name="${{name}}"]:checked`)).map(i => i.value);
+      }}
+
+      async function submitLog(event, assetId) {{
+        event.preventDefault();
+        const form = event.target;
+        let fileIds = [];
+
+        const fileInput = form.querySelector('input[name="image"]');
+        if (fileInput.files.length) {{
+          const fd = new FormData();
+          fd.append('file', fileInput.files[0]);
+          const upload = await fetch('/api/uploads/maintenance', {{ method: 'POST', body: fd }});
+          if (!upload.ok) {{
+            alert('Upload failed');
+            return;
+          }}
+          const uploadData = await upload.json();
+          fileIds.push(uploadData.$id);
+        }}
+
+        const payload = {{
+          asset_id: assetId,
+          work_category: form.work_category.value,
+          job_description: form.job_description.value,
+          image_file_ids: fileIds,
+          parameters: {{
+            suction_pressure: form.suction_pressure.value ? Number(form.suction_pressure.value) : null,
+            discharge_pressure: form.discharge_pressure.value ? Number(form.discharge_pressure.value) : null,
+            ampere_reading: form.ampere_reading.value ? Number(form.ampere_reading.value) : null,
+            materials_used: form.materials_used.value || null,
+            hvac_checklist: checklistValues(form, 'hvac_checklist'),
+            electrical_checklist: checklistValues(form, 'electrical_checklist'),
+            plumbing_checklist: checklistValues(form, 'plumbing_checklist'),
+            painting_checklist: checklistValues(form, 'painting_checklist')
+          }}
+        }};
+
+        const res = await fetch('/api/maintenance-logs', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify(payload)
+        }});
+
+        if (!res.ok) {{
+          const e = await res.json();
+          alert(e.error || e.detail || 'Failed');
+          return;
+        }}
+
+        alert('Maintenance log saved');
+        form.reset();
+      }}
+
+      async function downloadPdf() {{
+        const contractId = document.getElementById('contractSelect').value;
+        if (!contractId) return alert('Select a site');
+
+        const res = await fetch(`/api/generate-pdf/${{encodeURIComponent(contractId)}}`);
+        if (!res.ok) {{
+          alert('PDF generation failed');
+          return;
+        }}
+
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = filename;
+        a.download = `service-report-${{contractId}}.pdf`;
         document.body.appendChild(a);
         a.click();
         a.remove();
-        window.URL.revokeObjectURL(url);
+        URL.revokeObjectURL(url);
+      }}
+    </script>
+    """
 
-        toast('PDF downloaded successfully.', 'success');
-      } catch (err) {
-        toast(`PDF download failed: ${err.message}`, 'error');
-      }
-    }
 
-    async function saveTechnicianNotes(event) {
-      event.preventDefault();
+def render_dashboard(ctx: AuthContext) -> str:
+    if ctx.role == AppRole.Admin:
+        body = admin_dashboard(ctx)
+    elif ctx.role == AppRole.Accountant:
+        body = accountant_dashboard(ctx)
+    else:
+        body = technician_dashboard(ctx)
 
-      const reportId = $('techReportId').value.trim();
-      if (!reportId) {
-        toast('Select or enter a Service Report ID.', 'error');
-        return;
-      }
+    return shell_html("MAK INFRATECH Dashboard", body, ctx)
 
-      const payload = {};
-      if ($('workPerformed').value.trim()) payload.work_performed = $('workPerformed').value.trim();
-      if ($('techObservations').value.trim()) payload.technician_observations = $('techObservations').value.trim();
-      if ($('pressureAfter').value) payload.pressure_after_service = Number($('pressureAfter').value);
-      if ($('ampereAfter').value) payload.ampere_after_service = Number($('ampereAfter').value);
-      if ($('reportStatus').value) payload.status = $('reportStatus').value;
 
-      if (Object.keys(payload).length === 0) {
-        toast('No technician fields to update.', 'error');
-        return;
-      }
+def contracts_page(ctx: AuthContext) -> str:
+    contracts = crud.list_contracts(databases, DATABASE_ID, ctx)
+    rows = ""
 
-      try {
-        await api(`/service-reports/${encodeURIComponent(reportId)}`, {
-          method: 'PATCH',
-          body: JSON.stringify(payload)
-        });
-        toast('Service report updated.', 'success');
-        await loadReports();
-      } catch (err) {
-        toast(`Update failed: ${err.message}`, 'error');
-      }
-    }
+    for c in contracts:
+        if ctx.role == AppRole.Technician:
+            financial = ""
+        else:
+            financial = f"<td class='px-4 py-3 font-bold'>AED {float(c.get('contract_value') or 0):,.2f}</td>"
 
-    function openModal() {
-      $('addModal').classList.remove('hidden');
-    }
+        rows += f"""
+        <tr class="border-b border-slate-100">
+          <td class="px-4 py-3 font-bold">{c.get("customer_name")}</td>
+          <td class="px-4 py-3">{c.get("building_villa_name")}</td>
+          <td class="px-4 py-3">{c.get("start_date")} → {c.get("end_date")}</td>
+          {financial}
+          <td class="px-4 py-3">
+            <a class="rounded-xl bg-blue-600 px-3 py-2 text-xs font-black text-white" href="/api/generate-pdf/{c["$id"]}">PDF</a>
+          </td>
+        </tr>
+        """
 
-    function closeModal() {
-      $('addModal').classList.add('hidden');
-    }
+    financial_header = "" if ctx.role == AppRole.Technician else "<th class='px-4 py-3 text-left'>Value</th>"
 
-    function nullableString(id) {
-      const value = $(id).value.trim();
-      return value ? value : null;
-    }
+    create_form = ""
+    if ctx.role in {AppRole.Admin, AppRole.Accountant}:
+        create_form = """
+        <section class="mb-6 rounded-[2rem] bg-white p-5 shadow-xl">
+          <h2 class="text-xl font-black">Create Contract</h2>
+          <form method="post" action="/ui/contracts" class="mt-4 grid gap-3 md:grid-cols-2">
+            <input name="customer_name" required class="rounded-2xl border px-4 py-3" placeholder="Customer Name">
+            <input name="building_villa_name" required class="rounded-2xl border px-4 py-3" placeholder="Building / Villa Name">
+            <input name="address" required class="rounded-2xl border px-4 py-3 md:col-span-2" placeholder="Address">
+            <input name="contract_value" required type="number" step="0.01" class="rounded-2xl border px-4 py-3" placeholder="Contract Value">
+            <input name="start_date" required type="date" class="rounded-2xl border px-4 py-3">
+            <input name="end_date" required type="date" class="rounded-2xl border px-4 py-3">
+            <input name="total_ppms_per_year" required type="number" class="rounded-2xl border px-4 py-3" placeholder="PPMs / Year">
+            <input name="total_emis_per_year" required type="number" class="rounded-2xl border px-4 py-3" placeholder="EMIs / Year">
+            <button class="rounded-2xl bg-slate-950 px-5 py-3 font-black text-white md:col-span-2">Create + Auto Schedule</button>
+          </form>
+        </section>
+        """
 
-    function nullableNumber(id) {
-      const value = $(id).value;
-      return value === '' ? null : Number(value);
-    }
+    body = f"""
+    <section class="mb-6 rounded-[2rem] border border-white/10 bg-white/[.08] p-6 text-white shadow-2xl">
+      <h1 class="text-3xl font-black">Contracts</h1>
+      <p class="mt-2 text-sm text-slate-200">Multi-unit building and villa contracts with automated EMI and PPM lifecycle schedules.</p>
+    </section>
 
-    async function createCustomerAsset(event) {
-      event.preventDefault();
+    {create_form}
 
-      const customerType = $('customerType').value;
+    <section class="overflow-hidden rounded-[2rem] bg-white shadow-xl">
+      <div class="overflow-x-auto">
+        <table class="min-w-full text-sm">
+          <thead class="bg-slate-100">
+            <tr>
+              <th class="px-4 py-3 text-left">Customer</th>
+              <th class="px-4 py-3 text-left">Building / Villa</th>
+              <th class="px-4 py-3 text-left">Period</th>
+              {financial_header}
+              <th class="px-4 py-3 text-left">Report</th>
+            </tr>
+          </thead>
+          <tbody>{rows or "<tr><td class='px-4 py-6 text-slate-500' colspan='5'>No contracts found.</td></tr>"}</tbody>
+        </table>
+      </div>
+    </section>
+    """
 
-      const clientPayload = {
-        customer_type: customerType,
-        name: $('customerName').value.trim(),
-        phone: $('customerPhone').value.trim(),
-        email: nullableString('customerEmail'),
-        address_line1: $('addressLine1').value.trim(),
-        address_line2: nullableString('addressLine2'),
-        city: $('city').value.trim(),
-        state: $('state').value.trim(),
-        flat_number: nullableString('flatNumber')
-      };
+    return shell_html("Contracts - MAK INFRATECH", body, ctx)
 
-      if (customerType === 'amc') {
-        clientPayload.amc_details = {
-          contract_start_date: $('contractStart').value,
-          contract_end_date: $('contractEnd').value,
-          contract_value: Number($('contractValue').value),
-          emi_count: Number($('emiCount').value || 1),
-          ppm_count: Number($('ppmCount').value || 0)
-        };
-      }
 
-      try {
-        const createdClient = await api('/clients', {
-          method: 'POST',
-          body: JSON.stringify(clientPayload)
-        });
-
-        let createdAsset = null;
-
-        if ($('unitNumber').value.trim()) {
-          const assetPayload = {
-            client_id: createdClient.$id,
-            unit_number: $('unitNumber').value.trim(),
-            brand: $('brand').value,
-            refrigerant: $('refrigerant').value,
-            pressure: nullableNumber('pressure'),
-            ampere: nullableNumber('ampere'),
-            condition: $('condition').value,
-            location_description: nullableString('locationDescription')
-          };
-
-          createdAsset = await api('/ac-units', {
-            method: 'POST',
-            body: JSON.stringify(assetPayload)
-          });
-        }
-
-        $('addResult').textContent = JSON.stringify({
-          client: createdClient,
-          asset: createdAsset
-        }, null, 2);
-
-        toast('Customer / asset created successfully.', 'success');
-        await loadDashboard();
-      } catch (err) {
-        $('addResult').textContent = err.message;
-        toast(`Create failed: ${err.message}`, 'error');
-      }
-    }
-
-    async function parseBarcode() {
-      const barcode = $('barcodeInput').value.trim();
-      if (!barcode) {
-        toast('Enter barcode value.', 'error');
-        return;
-      }
-
-      try {
-        const parsed = await api('/barcodes/parse', {
-          method: 'POST',
-          body: JSON.stringify({ barcode_value: barcode })
-        });
-
-        let found = null;
-        if (parsed.valid) {
-          try {
-            found = await api(`/barcodes/${encodeURIComponent(barcode)}/ac-unit`);
-          } catch (err) {
-            found = { lookup_error: err.message };
-          }
-        }
-
-        $('barcodeResult').textContent = JSON.stringify({ parsed, found }, null, 2);
-      } catch (err) {
-        $('barcodeResult').textContent = err.message;
-      }
-    }
-
-    document.addEventListener('DOMContentLoaded', async () => {
-      document.querySelectorAll('.nav-btn').forEach(btn => {
-        btn.addEventListener('click', () => setView(btn.dataset.view));
-      });
-
-      $('mobileMenuBtn').addEventListener('click', () => $('mobileNav').classList.toggle('hidden'));
-      $('tokenBtn').addEventListener('click', connectToken);
-      $('refreshBtn').addEventListener('click', async () => { await loadDashboard(); await loadReports(); });
-      $('refreshTechBtn').addEventListener('click', loadReports);
-
-      $('openAddModal').addEventListener('click', openModal);
-      $('openAddModalHero').addEventListener('click', openModal);
-      $('openAddModalAssets').addEventListener('click', openModal);
-      $('closeAddModal').addEventListener('click', closeModal);
-
-      $('customerType').addEventListener('change', () => {
-        $('amcFields').classList.toggle('hidden', $('customerType').value !== 'amc');
-      });
-
-      $('resetAddForm').addEventListener('click', () => {
-        $('addCustomerAssetForm').reset();
-        $('amcFields').classList.add('hidden');
-        $('addResult').textContent = 'Submission result will appear here.';
-      });
-
-      $('addCustomerAssetForm').addEventListener('submit', createCustomerAsset);
-      $('techUpdateForm').addEventListener('submit', saveTechnicianNotes);
-      $('downloadPdfBtn').addEventListener('click', () => downloadPdf($('techReportId').value.trim()));
-      $('parseBarcodeBtn').addEventListener('click', parseBarcode);
-
-      setView('overview');
-
-      if (state.token) {
-        await loadMe();
-        await loadDashboard();
-        await loadReports();
-      }
-    });
-  </script>
-</body>
-</html>
-"""
-
+# ============================================================
+# UI Routes
+# ============================================================
 
 @app.get("/", response_class=HTMLResponse)
-async def dashboard_root() -> HTMLResponse:
-    return HTMLResponse(content=DASHBOARD_HTML)
+async def root(ctx: Annotated[Optional[AuthContext], Depends(optional_context)]) -> HTMLResponse:
+    if not ctx:
+        return HTMLResponse(login_html())
+    return HTMLResponse(render_dashboard(ctx))
 
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_get() -> HTMLResponse:
+    return HTMLResponse(login_html())
+
+
+@app.post("/login")
+async def login_post(jwt: Annotated[str, Form()]) -> RedirectResponse:
+    ctx = crud.resolve_auth_context(jwt=jwt, databases=databases, users=users, database_id=DATABASE_ID)
+    response = RedirectResponse("/", status_code=303)
+    set_session_cookie(response, ctx)
+    return response
+
+
+@app.get("/logout")
+async def logout() -> RedirectResponse:
+    response = RedirectResponse("/login", status_code=303)
+    clear_session_cookie(response)
+    return response
+
+
+@app.get("/contracts", response_class=HTMLResponse)
+async def contracts_ui(ctx: Annotated[AuthContext, Depends(get_current_context)]) -> HTMLResponse:
+    return HTMLResponse(contracts_page(ctx))
+
+
+@app.get("/technician", response_class=HTMLResponse)
+async def technician_ui(ctx: Annotated[AuthContext, Depends(get_current_context)]) -> HTMLResponse:
+    crud.require_roles(ctx, {AppRole.Admin, AppRole.Technician})
+    return HTMLResponse(shell_html("Technician - MAK INFRATECH", technician_dashboard(ctx), ctx))
+
+
+@app.post("/ui/contracts")
+async def ui_create_contract(
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
+    customer_name: Annotated[str, Form()],
+    building_villa_name: Annotated[str, Form()],
+    address: Annotated[str, Form()],
+    contract_value: Annotated[float, Form()],
+    start_date: Annotated[str, Form()],
+    end_date: Annotated[str, Form()],
+    total_ppms_per_year: Annotated[int, Form()],
+    total_emis_per_year: Annotated[int, Form()],
+) -> RedirectResponse:
+    payload = ContractCreate(
+        customer_name=customer_name,
+        building_villa_name=building_villa_name,
+        address=address,
+        contract_value=contract_value,
+        start_date=start_date,
+        end_date=end_date,
+        total_ppms_per_year=total_ppms_per_year,
+        total_emis_per_year=total_emis_per_year,
+    )
+    crud.create_contract(databases, DATABASE_ID, ctx, payload)
+    return RedirectResponse("/contracts", status_code=303)
+
+
+@app.post("/ui/settings")
+async def ui_update_settings(
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
+    company_name: Annotated[str, Form()],
+    trn_number: Annotated[str, Form()],
+    vat_percentage: Annotated[float, Form()],
+) -> RedirectResponse:
+    payload = SettingsUpdate(
+        company_name=company_name,
+        trn_number=trn_number,
+        vat_percentage=vat_percentage,
+    )
+    crud.upsert_settings(databases, DATABASE_ID, ctx, payload)
+    return RedirectResponse("/", status_code=303)
+
+
+# ============================================================
+# API Auth / Health
+# ============================================================
 
 @app.get("/health")
 async def health() -> dict[str, str]:
@@ -1101,289 +847,243 @@ async def health() -> dict[str, str]:
         "status": "ok",
         "app": APP_NAME,
         "environment": APP_ENV,
-        "database_provider": "appwrite",
-        "pdf_engine": "local-scribus-template-pypdf",
-        "dashboard": "enabled",
+        "database": "Appwrite",
+        "rbac": "server-side-master-api-key",
+        "pdf": "local-scribus-pypdf",
     }
 
 
-@app.get("/me")
-async def me(
-    ctx: Annotated[AuthContext, Depends(get_auth_context)],
-) -> dict:
-    return ctx.model_dump(mode="json", exclude={"jwt"})
+@app.post("/api/login")
+async def api_login(payload: LoginRequest, response: Response) -> dict:
+    ctx = crud.resolve_auth_context(payload.jwt, databases, users, DATABASE_ID)
+    set_session_cookie(response, ctx)
+    return {"ok": True, "user": ctx.model_dump(mode="json")}
 
 
-@app.get("/dashboard/stats")
-async def dashboard_stats(
-    ctx: Annotated[AuthContext, Depends(get_auth_context)],
-) -> dict[str, int]:
-    clients = crud.list_clients(
-        databases=databases,
-        database_id=DATABASE_ID,
-        ctx=ctx,
-    )
+@app.get("/api/me")
+async def api_me(ctx: Annotated[AuthContext, Depends(get_current_context)]) -> dict:
+    return ctx.model_dump(mode="json")
 
-    reports = crud.list_assigned_service_reports(
-        databases=databases,
-        database_id=DATABASE_ID,
-        ctx=ctx,
-    )
 
-    open_reports = [
-        report for report in reports
-        if report.get("status") in {"scheduled", "in_progress"}
-    ]
-
-    amc_clients = [
-        client_doc for client_doc in clients
-        if client_doc.get("customer_type") == "amc"
-    ]
-
-    if ctx.role.value == "admin_staff":
-        assets = crud.list_documents(
-            databases=databases,
-            database_id=DATABASE_ID,
-            collection_id=crud.COLLECTION_AC_UNITS,
-            queries=[Query.limit(500)],
-        )
-        total_assets = len(assets)
-    else:
-        assigned_client_ids = {
-            report.get("client_id")
-            for report in reports
-            if report.get("client_id")
-        }
-
-        asset_ids: set[str] = set()
-        for client_id in assigned_client_ids:
-            client_assets = crud.list_documents(
-                databases=databases,
-                database_id=DATABASE_ID,
-                collection_id=crud.COLLECTION_AC_UNITS,
-                queries=[
-                    Query.equal("client_id", client_id),
-                    Query.limit(100),
-                ],
-            )
-            for asset in client_assets:
-                if asset.get("$id"):
-                    asset_ids.add(asset["$id"])
-
-        total_assets = len(asset_ids)
-
-    return {
-        "active_clients": len(clients),
-        "open_maintenance_complaints": len(open_reports),
-        "amc_contracts": len(amc_clients),
-        "total_assets_tracked": total_assets,
-    }
+@app.get("/api/dashboard/stats")
+async def api_dashboard_stats(ctx: Annotated[AuthContext, Depends(get_current_context)]) -> dict:
+    return crud.dashboard_stats(databases, DATABASE_ID, ctx)
 
 
 # ============================================================
-# Clients
+# Settings
 # ============================================================
 
-@app.post("/clients")
-async def create_client_endpoint(
-    payload: ClientCreate,
-    ctx: Annotated[AuthContext, Depends(get_auth_context)],
+@app.get("/api/settings")
+async def api_get_settings(ctx: Annotated[AuthContext, Depends(get_current_context)]) -> dict:
+    crud.require_roles(ctx, {AppRole.Admin, AppRole.Accountant})
+    return crud.get_settings(databases, DATABASE_ID)
+
+
+@app.post("/api/settings")
+async def api_save_settings(
+    payload: SettingsCreate,
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
 ) -> dict:
-    return crud.create_client(
-        databases=databases,
-        database_id=DATABASE_ID,
-        ctx=ctx,
-        payload=payload,
-    )
+    return crud.upsert_settings(databases, DATABASE_ID, ctx, payload)
 
 
-@app.get("/clients")
-async def list_clients_endpoint(
-    ctx: Annotated[AuthContext, Depends(get_auth_context)],
+# ============================================================
+# Staff
+# ============================================================
+
+@app.post("/api/staff")
+async def api_create_staff(
+    payload: StaffCreate,
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
+) -> dict:
+    return crud.create_staff(databases, DATABASE_ID, ctx, payload)
+
+
+@app.get("/api/staff")
+async def api_list_staff(ctx: Annotated[AuthContext, Depends(get_current_context)]) -> list[dict]:
+    return crud.list_staff(databases, DATABASE_ID, ctx)
+
+
+@app.patch("/api/staff/{staff_id}")
+async def api_update_staff(
+    staff_id: str,
+    payload: StaffUpdate,
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
+) -> dict:
+    return crud.update_staff(databases, DATABASE_ID, ctx, staff_id, payload)
+
+
+@app.get("/api/staff/compliance-alerts")
+async def api_staff_compliance(ctx: Annotated[AuthContext, Depends(get_current_context)]) -> list[dict]:
+    crud.require_roles(ctx, {AppRole.Admin})
+    return [alert.model_dump(mode="json") for alert in crud.get_staff_compliance_alerts(databases, DATABASE_ID)]
+
+
+# ============================================================
+# Contracts / Schedules
+# ============================================================
+
+@app.post("/api/contracts")
+async def api_create_contract(
+    payload: ContractCreate,
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
+) -> dict:
+    return crud.create_contract(databases, DATABASE_ID, ctx, payload)
+
+
+@app.get("/api/contracts")
+async def api_list_contracts(ctx: Annotated[AuthContext, Depends(get_current_context)]) -> list[dict]:
+    return crud.list_contracts(databases, DATABASE_ID, ctx)
+
+
+@app.get("/api/contracts/{contract_id}")
+async def api_get_contract(
+    contract_id: str,
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
+) -> dict:
+    return crud.get_contract(databases, DATABASE_ID, ctx, contract_id)
+
+
+@app.patch("/api/contracts/{contract_id}")
+async def api_update_contract(
+    contract_id: str,
+    payload: ContractUpdate,
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
+) -> dict:
+    return crud.update_contract(databases, DATABASE_ID, ctx, contract_id, payload)
+
+
+@app.get("/api/schedules")
+async def api_list_schedules(
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
+    contract_id: Optional[str] = None,
+    type: Optional[ScheduleType] = None,
 ) -> list[dict]:
-    return crud.list_clients(
-        databases=databases,
-        database_id=DATABASE_ID,
-        ctx=ctx,
-    )
+    return crud.list_schedules(databases, DATABASE_ID, ctx, contract_id, type)
 
 
-@app.get("/clients/{client_id}")
-async def get_client_endpoint(
-    client_id: str,
-    ctx: Annotated[AuthContext, Depends(get_auth_context)],
+@app.patch("/api/schedules/{schedule_id}")
+async def api_update_schedule(
+    schedule_id: str,
+    payload: AutomatedScheduleUpdate,
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
 ) -> dict:
-    return crud.get_client(
-        databases=databases,
-        database_id=DATABASE_ID,
-        ctx=ctx,
-        client_id=client_id,
-    )
-
-
-@app.patch("/clients/{client_id}")
-async def update_client_endpoint(
-    client_id: str,
-    payload: ClientUpdate,
-    ctx: Annotated[AuthContext, Depends(get_auth_context)],
-) -> dict:
-    return crud.update_client(
-        databases=databases,
-        database_id=DATABASE_ID,
-        ctx=ctx,
-        client_id=client_id,
-        payload=payload,
-    )
+    return crud.update_schedule(databases, DATABASE_ID, ctx, schedule_id, payload)
 
 
 # ============================================================
-# AC Units / Barcode
+# Assets
 # ============================================================
 
-@app.post("/ac-units")
-async def create_ac_unit_endpoint(
-    payload: ACUnitCreate,
-    ctx: Annotated[AuthContext, Depends(get_auth_context)],
+@app.post("/api/assets")
+async def api_create_asset(
+    payload: AssetCreate,
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
 ) -> dict:
-    return crud.create_ac_unit(
-        databases=databases,
-        database_id=DATABASE_ID,
-        ctx=ctx,
-        payload=payload,
-    )
+    return crud.create_asset(databases, DATABASE_ID, ctx, payload)
 
 
-@app.patch("/ac-units/{unit_id}/metrics")
-async def update_ac_unit_metrics_endpoint(
-    unit_id: str,
-    payload: ACUnitUpdateMetrics,
-    ctx: Annotated[AuthContext, Depends(get_auth_context)],
-) -> dict:
-    return crud.update_ac_unit_metrics(
-        databases=databases,
-        database_id=DATABASE_ID,
-        ctx=ctx,
-        unit_id=unit_id,
-        payload=payload,
-    )
-
-
-@app.post("/barcodes/parse")
-async def parse_barcode_endpoint(payload: BarcodeParseRequest) -> dict:
-    return crud.parse_barcode_value(payload.barcode_value).model_dump(mode="json")
-
-
-@app.get("/barcodes/{barcode_value}/ac-unit")
-async def find_ac_unit_by_barcode_endpoint(
-    barcode_value: str,
-    ctx: Annotated[AuthContext, Depends(get_auth_context)],
-) -> dict:
-    parsed = crud.parse_barcode_value(barcode_value)
-
-    if not parsed.valid:
-        raise HTTPException(status_code=400, detail="Invalid barcode format")
-
-    unit = crud.find_ac_unit_by_barcode(
-        databases=databases,
-        database_id=DATABASE_ID,
-        barcode_value=barcode_value,
-    )
-
-    if not unit:
-        raise HTTPException(status_code=404, detail="AC unit not found")
-
-    if ctx.role.value != "admin_staff":
-        crud.assert_technician_assigned_to_client(
-            databases=databases,
-            database_id=DATABASE_ID,
-            technician_id=ctx.user_id,
-            client_id=unit["client_id"],
-        )
-
-    return unit
-
-
-# ============================================================
-# Service Reports
-# ============================================================
-
-@app.post("/service-reports")
-async def create_service_report_endpoint(
-    payload: ServiceReportCreate,
-    ctx: Annotated[AuthContext, Depends(get_auth_context)],
-) -> dict:
-    return crud.create_service_report(
-        databases=databases,
-        database_id=DATABASE_ID,
-        ctx=ctx,
-        payload=payload,
-    )
-
-
-@app.get("/service-reports/assigned")
-async def list_assigned_service_reports_endpoint(
-    ctx: Annotated[AuthContext, Depends(get_auth_context)],
+@app.get("/api/assets")
+async def api_list_assets(
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
+    contract_id: Optional[str] = None,
 ) -> list[dict]:
-    return crud.list_assigned_service_reports(
-        databases=databases,
-        database_id=DATABASE_ID,
-        ctx=ctx,
-    )
+    return crud.list_assets(databases, DATABASE_ID, ctx, contract_id)
 
 
-@app.get("/service-reports/{report_id}")
-async def get_service_report_endpoint(
-    report_id: str,
-    ctx: Annotated[AuthContext, Depends(get_auth_context)],
+@app.patch("/api/assets/{asset_id}")
+async def api_update_asset(
+    asset_id: str,
+    payload: AssetUpdate,
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
 ) -> dict:
-    return crud.get_service_report(
-        databases=databases,
-        database_id=DATABASE_ID,
-        ctx=ctx,
-        report_id=report_id,
-    )
+    return crud.update_asset(databases, DATABASE_ID, ctx, asset_id, payload)
 
 
-@app.patch("/service-reports/{report_id}")
-async def update_service_report_endpoint(
-    report_id: str,
-    payload: ServiceReportUpdate,
-    ctx: Annotated[AuthContext, Depends(get_auth_context)],
+# ============================================================
+# Maintenance Logs
+# ============================================================
+
+@app.post("/api/maintenance-logs")
+async def api_create_maintenance_log(
+    payload: MaintenanceLogCreate,
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
 ) -> dict:
-    return crud.update_service_report(
-        databases=databases,
-        database_id=DATABASE_ID,
-        ctx=ctx,
-        report_id=report_id,
-        payload=payload,
-    )
+    return crud.create_maintenance_log(databases, DATABASE_ID, ctx, payload)
 
 
-@app.get("/service-reports/{report_id}/pdf-payload")
-async def get_service_report_pdf_payload_endpoint(
-    report_id: str,
-    ctx: Annotated[AuthContext, Depends(get_auth_context)],
+@app.get("/api/maintenance-logs")
+async def api_list_maintenance_logs(
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
+    asset_id: Optional[str] = None,
+    technician_id: Optional[str] = None,
+) -> list[dict]:
+    return crud.list_maintenance_logs(databases, DATABASE_ID, ctx, asset_id, technician_id)
+
+
+@app.patch("/api/maintenance-logs/{log_id}")
+async def api_update_maintenance_log(
+    log_id: str,
+    payload: MaintenanceLogUpdate,
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
 ) -> dict:
-    report = crud.get_service_report(
-        databases=databases,
-        database_id=DATABASE_ID,
+    return crud.update_maintenance_log(databases, DATABASE_ID, ctx, log_id, payload)
+
+
+# ============================================================
+# Uploads
+# ============================================================
+
+@app.post("/api/uploads/maintenance")
+async def api_upload_maintenance_file(
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
+    file: UploadFile = File(...),
+) -> dict:
+    content = await file.read()
+
+    return await crud.upload_file_to_storage(
+        storage=storage,
         ctx=ctx,
-        report_id=report_id,
+        bucket_id=crud.BUCKET_MAINTENANCE_UPLOADS,
+        filename=file.filename or "maintenance_upload",
+        content=content,
+        content_type=file.content_type,
     )
 
-    return crud.build_service_report_pdf_payload(report=report, ctx=ctx)
+
+@app.post("/api/uploads/staff-document")
+async def api_upload_staff_document(
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
+    file: UploadFile = File(...),
+) -> dict:
+    crud.require_admin(ctx)
+    content = await file.read()
+
+    return await crud.upload_file_to_storage(
+        storage=storage,
+        ctx=ctx,
+        bucket_id=crud.BUCKET_STAFF_DOCUMENTS,
+        filename=file.filename or "staff_document",
+        content=content,
+        content_type=file.content_type,
+    )
 
 
-@app.get("/service-reports/{report_id}/pdf")
-async def download_service_report_pdf_endpoint(
-    report_id: str,
-    ctx: Annotated[AuthContext, Depends(get_auth_context)],
+# ============================================================
+# Scribus PDF
+# ============================================================
+
+@app.get("/api/generate-pdf/{contract_id}")
+async def api_generate_pdf(
+    contract_id: str,
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
 ) -> StreamingResponse:
-    pdf_bytes, filename = crud.generate_service_report_pdf_bytes(
+    pdf_bytes, filename = crud.generate_scribus_pdf_bytes(
         databases=databases,
         database_id=DATABASE_ID,
         ctx=ctx,
-        report_id=report_id,
+        contract_id=contract_id,
     )
 
     return StreamingResponse(
@@ -1396,137 +1096,30 @@ async def download_service_report_pdf_endpoint(
     )
 
 
-@app.get("/service-reports/{report_id}/download")
-async def download_service_report_pdf_alias_endpoint(
-    report_id: str,
-    ctx: Annotated[AuthContext, Depends(get_auth_context)],
-) -> StreamingResponse:
-    pdf_bytes, filename = crud.generate_service_report_pdf_bytes(
-        databases=databases,
-        database_id=DATABASE_ID,
-        ctx=ctx,
-        report_id=report_id,
-    )
-
-    return StreamingResponse(
-        BytesIO(pdf_bytes),
-        media_type="application/pdf",
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
-            "Cache-Control": "no-store",
-        },
-    )
-
-
-@app.get("/pdf-template/fields")
-async def list_pdf_template_fields_endpoint(
-    ctx: Annotated[AuthContext, Depends(get_auth_context)],
-) -> dict:
-    if ctx.role.value != "admin_staff":
-        raise HTTPException(status_code=403, detail="Admin/Staff role required")
+@app.get("/api/pdf-template/fields")
+async def api_pdf_fields(ctx: Annotated[AuthContext, Depends(get_current_context)]) -> dict:
+    crud.require_admin(ctx)
 
     template_path = crud.resolve_pdf_template_path()
-    fields = crud.get_pdf_form_field_names(template_path)
+    from pypdf import PdfReader
+
+    reader = PdfReader(str(template_path))
+    fields = reader.get_fields() or {}
 
     return {
         "template": str(template_path),
-        "fields": sorted(fields),
-        "expected_service_report_fields": [
-            "service_report_number",
-            "client_name",
-            "full_address",
-            "flat_number",
-            "scheduled_date_time",
-            "nature_of_complaint",
-            "automated_staff_name",
-            "automated_staff_id",
-            "assigned_technician_name",
-            "assigned_technician_id",
-            "work_performed",
-            "technician_observations",
-            "ac_unit_id",
-            "ac_unit_unit_number",
-            "ac_unit_barcode_value",
-            "ac_unit_brand",
-            "ac_unit_refrigerant_type",
-            "ac_unit_pressure",
-            "ac_unit_ampere",
-            "ac_unit_condition",
-            "asset_metrics",
+        "fields": sorted(fields.keys()),
+        "example_loop_fields": [
+            "asset_1_flat_villa_no",
+            "asset_1_unit_type",
+            "asset_1_brand",
+            "asset_1_tonnage",
+            "asset_1_serial_no",
+            "asset_1_work_category",
+            "asset_1_job_description",
+            "asset_1_suction_pressure",
+            "asset_1_discharge_pressure",
+            "asset_1_ampere_reading",
+            "asset_1_materials_used",
         ],
     }
-
-
-# ============================================================
-# Financials - Invoices
-# ============================================================
-
-@app.post("/invoices")
-async def create_invoice_endpoint(
-    payload: InvoiceCreate,
-    ctx: Annotated[AuthContext, Depends(get_auth_context)],
-) -> dict:
-    return crud.create_invoice(
-        databases=databases,
-        database_id=DATABASE_ID,
-        ctx=ctx,
-        payload=payload,
-    )
-
-
-@app.patch("/invoices/{invoice_id}/status")
-async def update_invoice_status_endpoint(
-    invoice_id: str,
-    payload: InvoiceStatusUpdate,
-    ctx: Annotated[AuthContext, Depends(get_auth_context)],
-) -> dict:
-    return crud.update_invoice_status(
-        databases=databases,
-        database_id=DATABASE_ID,
-        ctx=ctx,
-        invoice_id=invoice_id,
-        payload=payload,
-    )
-
-
-# ============================================================
-# Financials - Expenses
-# ============================================================
-
-@app.post("/expenses")
-async def create_expense_endpoint(
-    payload: ExpenseCreate,
-    ctx: Annotated[AuthContext, Depends(get_auth_context)],
-) -> dict:
-    return crud.create_expense(
-        databases=databases,
-        database_id=DATABASE_ID,
-        ctx=ctx,
-        payload=payload,
-    )
-
-
-@app.get("/expenses")
-async def list_expenses_endpoint(
-    ctx: Annotated[AuthContext, Depends(get_auth_context)],
-) -> list[dict]:
-    return crud.list_expenses(
-        databases=databases,
-        database_id=DATABASE_ID,
-        ctx=ctx,
-    )
-
-
-@app.patch("/expenses/{expense_id}/approval")
-async def approve_expense_endpoint(
-    expense_id: str,
-    payload: ExpenseApprovalUpdate,
-    ctx: Annotated[AuthContext, Depends(get_auth_context)],
-) -> dict:
-    return crud.approve_expense(
-        databases=databases,
-        database_id=DATABASE_ID,
-        ctx=ctx,
-        expense_id=expense_id,
-        payload=payload,
-    )
