@@ -1123,3 +1123,543 @@ async def api_pdf_fields(ctx: Annotated[AuthContext, Depends(get_current_context
             "asset_1_materials_used",
         ],
     }
+# ============================================================
+# Additional Contract Operations
+# ============================================================
+
+@app.post("/api/contracts/{contract_id}/regenerate-schedules")
+async def api_regenerate_contract_schedules(
+    contract_id: str,
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
+) -> dict:
+    crud.require_roles(ctx, {AppRole.Admin, AppRole.Accountant})
+
+    contract = crud.get_document(
+        databases=databases,
+        database_id=DATABASE_ID,
+        collection_id=crud.COLLECTION_CONTRACTS,
+        document_id_value=contract_id,
+    )
+
+    schedules = crud.regenerate_contract_schedules(
+        databases=databases,
+        database_id=DATABASE_ID,
+        contract_id=contract_id,
+        contract_data=contract,
+    )
+
+    return {
+        "ok": True,
+        "contract_id": contract_id,
+        "generated_count": len(schedules),
+        "schedules": schedules,
+    }
+
+
+@app.get("/api/contracts/{contract_id}/schedules")
+async def api_contract_schedules(
+    contract_id: str,
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
+) -> list[dict]:
+    return crud.list_schedules(
+        databases=databases,
+        database_id=DATABASE_ID,
+        ctx=ctx,
+        contract_id=contract_id,
+    )
+
+
+@app.get("/api/contracts/{contract_id}/assets")
+async def api_contract_assets(
+    contract_id: str,
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
+) -> list[dict]:
+    return crud.list_assets(
+        databases=databases,
+        database_id=DATABASE_ID,
+        ctx=ctx,
+        contract_id=contract_id,
+    )
+
+
+@app.get("/api/contracts/{contract_id}/maintenance-summary")
+async def api_contract_maintenance_summary(
+    contract_id: str,
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
+) -> dict:
+    crud.require_roles(ctx, {AppRole.Admin, AppRole.Technician})
+
+    contract = crud.get_contract(
+        databases=databases,
+        database_id=DATABASE_ID,
+        ctx=ctx,
+        contract_id=contract_id,
+    )
+
+    assets = crud.list_assets(
+        databases=databases,
+        database_id=DATABASE_ID,
+        ctx=ctx,
+        contract_id=contract_id,
+    )
+
+    asset_summaries: list[dict] = []
+
+    for asset in assets:
+        logs = crud.list_maintenance_logs(
+            databases=databases,
+            database_id=DATABASE_ID,
+            ctx=ctx,
+            asset_id=asset["$id"],
+        )
+
+        latest_log = logs[0] if logs else None
+
+        asset_summaries.append(
+            {
+                "asset": asset,
+                "log_count": len(logs),
+                "latest_log": latest_log,
+            }
+        )
+
+    return {
+        "contract": contract,
+        "asset_count": len(assets),
+        "assets": asset_summaries,
+    }
+
+
+# ============================================================
+# Admin Staff UI
+# ============================================================
+
+def staff_page(ctx: AuthContext) -> str:
+    crud.require_roles(ctx, {AppRole.Admin, AppRole.Accountant})
+
+    staff_records = crud.list_staff(
+        databases=databases,
+        database_id=DATABASE_ID,
+        ctx=ctx,
+    )
+
+    compliance_alerts = crud.get_staff_compliance_alerts(
+        databases=databases,
+        database_id=DATABASE_ID,
+    )
+
+    alert_html = ""
+
+    if ctx.role == AppRole.Admin and compliance_alerts:
+        alert_html = """
+        <section class="mb-6 rounded-[2rem] border border-amber-300 bg-amber-100 p-5 shadow-xl">
+          <h2 class="text-xl font-black text-amber-950">HR Compliance Alerts</h2>
+          <div class="mt-4 grid gap-3 md:grid-cols-2">
+        """
+
+        for alert in compliance_alerts:
+            alert_html += f"""
+            <div class="rounded-2xl border border-amber-200 bg-white/70 p-4">
+              <p class="font-black text-slate-950">{alert.staff_name}</p>
+              <p class="text-sm text-slate-700">{alert.document_type} expires on {alert.expiry_date.isoformat()}</p>
+              <p class="mt-1 text-xs font-bold text-amber-700">{alert.days_remaining} days remaining</p>
+            </div>
+            """
+
+        alert_html += """
+          </div>
+        </section>
+        """
+
+    rows = ""
+
+    for staff in staff_records:
+        salary_column = ""
+        compliance_column = ""
+
+        if ctx.role in {AppRole.Admin, AppRole.Accountant}:
+            salary_column = f"""
+            <td class="px-4 py-3 font-bold">
+              AED {float(staff.get("base_salary") or 0):,.2f}
+            </td>
+            """
+
+        if ctx.role == AppRole.Admin:
+            documents = staff.get("documents") or {}
+            compliance_column = f"""
+            <td class="px-4 py-3 text-xs text-slate-600">
+              Passport: {documents.get("passport_expiry") or "—"}<br>
+              EID: {documents.get("eid_expiry") or "—"}<br>
+              Insurance: {documents.get("insurance_expiry") or "—"}
+            </td>
+            """
+
+        rows += f"""
+        <tr class="border-b border-slate-100">
+          <td class="px-4 py-3 font-black">{staff.get("name")}</td>
+          <td class="px-4 py-3">{staff.get("position")}</td>
+          <td class="px-4 py-3">{staff.get("email") or "—"}</td>
+          {salary_column}
+          {compliance_column}
+        </tr>
+        """
+
+    salary_header = ""
+    compliance_header = ""
+
+    if ctx.role in {AppRole.Admin, AppRole.Accountant}:
+        salary_header = "<th class='px-4 py-3 text-left'>Base Salary</th>"
+
+    if ctx.role == AppRole.Admin:
+        compliance_header = "<th class='px-4 py-3 text-left'>Document Expiry</th>"
+
+    create_form = ""
+
+    if ctx.role == AppRole.Admin:
+        create_form = """
+        <section class="mb-6 rounded-[2rem] bg-white p-5 shadow-xl">
+          <h2 class="text-xl font-black">Create Staff Record</h2>
+          <p class="mt-1 text-sm text-slate-500">
+            Link staff to an Appwrite user by user_id or email. Position controls server-side RBAC.
+          </p>
+
+          <form method="post" action="/ui/staff" class="mt-4 grid gap-3 md:grid-cols-2">
+            <input name="name" required class="rounded-2xl border px-4 py-3" placeholder="Staff Name">
+            <input name="email" type="email" class="rounded-2xl border px-4 py-3" placeholder="Email">
+            <input name="user_id" class="rounded-2xl border px-4 py-3" placeholder="Appwrite User ID">
+            <select name="position" required class="rounded-2xl border px-4 py-3">
+              <option value="HVAC">HVAC</option>
+              <option value="Electrician">Electrician</option>
+              <option value="Plumber">Plumber</option>
+              <option value="Painter">Painter</option>
+              <option value="Accountant">Accountant</option>
+              <option value="Admin">Admin</option>
+            </select>
+            <input name="base_salary" type="number" step="0.01" value="0" class="rounded-2xl border px-4 py-3" placeholder="Base Salary">
+            <input name="passport_no" class="rounded-2xl border px-4 py-3" placeholder="Passport No">
+            <input name="passport_expiry" type="date" class="rounded-2xl border px-4 py-3">
+            <input name="eid_no" class="rounded-2xl border px-4 py-3" placeholder="Emirates ID No">
+            <input name="eid_expiry" type="date" class="rounded-2xl border px-4 py-3">
+            <input name="insurance_policy" class="rounded-2xl border px-4 py-3" placeholder="Insurance Policy">
+            <input name="insurance_expiry" type="date" class="rounded-2xl border px-4 py-3">
+            <button class="rounded-2xl bg-slate-950 px-5 py-3 font-black text-white md:col-span-2">
+              Create Staff
+            </button>
+          </form>
+        </section>
+        """
+
+    body = f"""
+    <section class="mb-6 rounded-[2rem] border border-white/10 bg-white/[.08] p-6 text-white shadow-2xl">
+      <h1 class="text-3xl font-black">Staff & HR Compliance</h1>
+      <p class="mt-2 text-sm text-slate-200">
+        Server-filtered view for payroll, staff roles, and document expiry compliance.
+      </p>
+    </section>
+
+    {alert_html}
+    {create_form}
+
+    <section class="overflow-hidden rounded-[2rem] bg-white shadow-xl">
+      <div class="overflow-x-auto">
+        <table class="min-w-full text-sm">
+          <thead class="bg-slate-100">
+            <tr>
+              <th class="px-4 py-3 text-left">Name</th>
+              <th class="px-4 py-3 text-left">Position</th>
+              <th class="px-4 py-3 text-left">Email</th>
+              {salary_header}
+              {compliance_header}
+            </tr>
+          </thead>
+          <tbody>
+            {rows or "<tr><td class='px-4 py-6 text-slate-500' colspan='5'>No staff found.</td></tr>"}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    """
+
+    return shell_html("Staff - MAK INFRATECH", body, ctx)
+
+
+@app.get("/staff", response_class=HTMLResponse)
+async def staff_ui(
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
+) -> HTMLResponse:
+    return HTMLResponse(staff_page(ctx))
+
+
+@app.post("/ui/staff")
+async def ui_create_staff(
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
+    name: Annotated[str, Form()],
+    position: Annotated[str, Form()],
+    base_salary: Annotated[float, Form()] = 0,
+    email: Annotated[Optional[str], Form()] = None,
+    user_id: Annotated[Optional[str], Form()] = None,
+    passport_no: Annotated[Optional[str], Form()] = None,
+    passport_expiry: Annotated[Optional[str], Form()] = None,
+    eid_no: Annotated[Optional[str], Form()] = None,
+    eid_expiry: Annotated[Optional[str], Form()] = None,
+    insurance_policy: Annotated[Optional[str], Form()] = None,
+    insurance_expiry: Annotated[Optional[str], Form()] = None,
+) -> RedirectResponse:
+    from models import StaffDocuments, StaffPosition
+
+    payload = StaffCreate(
+        user_id=user_id or None,
+        email=email or None,
+        name=name,
+        position=StaffPosition(position),
+        base_salary=base_salary,
+        documents=StaffDocuments(
+            passport_no=passport_no or None,
+            passport_expiry=passport_expiry or None,
+            eid_no=eid_no or None,
+            eid_expiry=eid_expiry or None,
+            insurance_policy=insurance_policy or None,
+            insurance_expiry=insurance_expiry or None,
+        ),
+    )
+
+    crud.create_staff(
+        databases=databases,
+        database_id=DATABASE_ID,
+        ctx=ctx,
+        payload=payload,
+    )
+
+    return RedirectResponse("/staff", status_code=303)
+
+
+# ============================================================
+# Asset Management UI
+# ============================================================
+
+def assets_page(ctx: AuthContext) -> str:
+    crud.require_roles(ctx, {AppRole.Admin, AppRole.Technician})
+
+    contracts = crud.list_contracts(
+        databases=databases,
+        database_id=DATABASE_ID,
+        ctx=ctx,
+    )
+
+    contract_options = "".join(
+        f"""
+        <option value="{contract["$id"]}">
+          {contract.get("building_villa_name")} · {contract.get("customer_name")}
+        </option>
+        """
+        for contract in contracts
+    )
+
+    selected_contract_id = contracts[0]["$id"] if contracts else None
+
+    assets = (
+        crud.list_assets(
+            databases=databases,
+            database_id=DATABASE_ID,
+            ctx=ctx,
+            contract_id=selected_contract_id,
+        )
+        if selected_contract_id
+        else []
+    )
+
+    rows = ""
+
+    for asset in assets:
+        rows += f"""
+        <tr class="border-b border-slate-100">
+          <td class="px-4 py-3 font-black">{asset.get("flat_villa_no")}</td>
+          <td class="px-4 py-3">{asset.get("unit_type")}</td>
+          <td class="px-4 py-3">{asset.get("brand")}</td>
+          <td class="px-4 py-3">{asset.get("tonnage") or "—"}</td>
+          <td class="px-4 py-3">{asset.get("serial_no") or "—"}</td>
+        </tr>
+        """
+
+    form_html = ""
+
+    if contracts:
+        form_html = f"""
+        <section class="mb-6 rounded-[2rem] bg-white p-5 shadow-xl">
+          <h2 class="text-xl font-black">Add Location / Asset</h2>
+          <form method="post" action="/ui/assets" class="mt-4 grid gap-3 md:grid-cols-2">
+            <select name="contract_id" required class="rounded-2xl border px-4 py-3">
+              {contract_options}
+            </select>
+
+            <input name="flat_villa_no" required class="rounded-2xl border px-4 py-3" placeholder="Flat / Villa No">
+
+            <select name="unit_type" required class="rounded-2xl border px-4 py-3">
+              <option value="Split">Split</option>
+              <option value="FCU">FCU</option>
+              <option value="FAHU">FAHU</option>
+              <option value="Package">Package</option>
+            </select>
+
+            <input name="brand" required class="rounded-2xl border px-4 py-3" placeholder="Brand">
+            <input name="tonnage" type="number" step="0.01" class="rounded-2xl border px-4 py-3" placeholder="Tonnage">
+            <input name="serial_no" class="rounded-2xl border px-4 py-3" placeholder="Serial No">
+
+            <button class="rounded-2xl bg-slate-950 px-5 py-3 font-black text-white md:col-span-2">
+              Add Asset
+            </button>
+          </form>
+        </section>
+        """
+
+    body = f"""
+    <section class="mb-6 rounded-[2rem] border border-white/10 bg-white/[.08] p-6 text-white shadow-2xl">
+      <h1 class="text-3xl font-black">Locations & Assets</h1>
+      <p class="mt-2 text-sm text-slate-200">
+        Flats, villas, AC units and maintainable equipment by contract.
+      </p>
+    </section>
+
+    {form_html}
+
+    <section class="overflow-hidden rounded-[2rem] bg-white shadow-xl">
+      <div class="overflow-x-auto">
+        <table class="min-w-full text-sm">
+          <thead class="bg-slate-100">
+            <tr>
+              <th class="px-4 py-3 text-left">Flat / Villa</th>
+              <th class="px-4 py-3 text-left">Unit Type</th>
+              <th class="px-4 py-3 text-left">Brand</th>
+              <th class="px-4 py-3 text-left">Tonnage</th>
+              <th class="px-4 py-3 text-left">Serial No</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows or "<tr><td class='px-4 py-6 text-slate-500' colspan='5'>No assets found for the first available contract.</td></tr>"}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    """
+
+    return shell_html("Assets - MAK INFRATECH", body, ctx)
+
+
+@app.get("/assets", response_class=HTMLResponse)
+async def assets_ui(
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
+) -> HTMLResponse:
+    return HTMLResponse(assets_page(ctx))
+
+
+@app.post("/ui/assets")
+async def ui_create_asset(
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
+    contract_id: Annotated[str, Form()],
+    flat_villa_no: Annotated[str, Form()],
+    unit_type: Annotated[str, Form()],
+    brand: Annotated[str, Form()],
+    tonnage: Annotated[Optional[float], Form()] = None,
+    serial_no: Annotated[Optional[str], Form()] = None,
+) -> RedirectResponse:
+    from models import UnitType
+
+    payload = AssetCreate(
+        contract_id=contract_id,
+        flat_villa_no=flat_villa_no,
+        unit_type=UnitType(unit_type),
+        brand=brand,
+        tonnage=tonnage,
+        serial_no=serial_no or None,
+    )
+
+    crud.create_asset(
+        databases=databases,
+        database_id=DATABASE_ID,
+        ctx=ctx,
+        payload=payload,
+    )
+
+    return RedirectResponse("/assets", status_code=303)
+
+
+# ============================================================
+# Lightweight Admin Diagnostics
+# ============================================================
+
+@app.get("/api/admin/collections-summary")
+async def api_collections_summary(
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
+) -> dict:
+    crud.require_admin(ctx)
+
+    collections = {
+        "settings": crud.COLLECTION_SETTINGS,
+        "staff": crud.COLLECTION_STAFF,
+        "contracts": crud.COLLECTION_CONTRACTS,
+        "automated_schedules": crud.COLLECTION_SCHEDULES,
+        "assets": crud.COLLECTION_ASSETS,
+        "maintenance_logs": crud.COLLECTION_MAINTENANCE_LOGS,
+    }
+
+    summary: dict[str, dict] = {}
+
+    for label, collection_id in collections.items():
+        docs = crud.list_documents(
+            databases=databases,
+            database_id=DATABASE_ID,
+            collection_id=collection_id,
+            queries=[],
+        )
+
+        summary[label] = {
+            "collection_id": collection_id,
+            "sample_count": len(docs),
+        }
+
+    return {
+        "database_id": DATABASE_ID,
+        "collections": summary,
+    }
+
+
+@app.get("/api/admin/storage-summary")
+async def api_storage_summary(
+    ctx: Annotated[AuthContext, Depends(get_current_context)],
+) -> dict:
+    crud.require_admin(ctx)
+
+    return {
+        "staff_documents_bucket": crud.BUCKET_STAFF_DOCUMENTS,
+        "maintenance_uploads_bucket": crud.BUCKET_MAINTENANCE_UPLOADS,
+    }
+
+
+# ============================================================
+# Startup Diagnostics
+# ============================================================
+
+@app.on_event("startup")
+async def startup_event() -> None:
+    if APP_DEBUG:
+        print("MAK INFRATECH FMS started")
+        print(f"Environment: {APP_ENV}")
+        print(f"Appwrite endpoint: {APPWRITE_ENDPOINT}")
+        print(f"Appwrite project: {APPWRITE_PROJECT_ID}")
+        print(f"Database ID: {DATABASE_ID}")
+        print(f"Session cookie secure: {SESSION_COOKIE_SECURE}")
+
+
+# ============================================================
+# Local Development Entrypoint
+# ============================================================
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "main:app",
+        host=os.getenv("HOST", "0.0.0.0"),
+        port=int(os.getenv("PORT", "8000")),
+        reload=APP_DEBUG,
+    )
