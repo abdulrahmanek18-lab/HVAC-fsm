@@ -204,17 +204,38 @@ async def get_current_context(
     authorization: Annotated[Optional[str], Header()] = None,
     session_cookie: Annotated[Optional[str], Cookie(alias=SESSION_COOKIE_NAME)] = None,
 ) -> AuthContext:
-    bearer = extract_bearer_token(authorization)
 
-    session = request.cookies.get("session")
-if session:
-    return crud.resolve_session(
-        session=session,
-        databases=databases,
-        database_id=DATABASE_ID,
-    )
+    # 1. Username/password session
+    if session_cookie:
+        try:
+            return crud.resolve_session(
+                session=session_cookie,
+                databases=databases,
+                database_id=DATABASE_ID,
+            )
+        except crud.AppError:
+            pass
+
+    # 2. Bearer token (optional for API)
+    bearer = extract_bearer_token(authorization)
+    if bearer:
+        try:
+            return crud.resolve_auth_context(
+                jwt=bearer,
+                databases=databases,
+                users=users,
+                database_id=DATABASE_ID,
+            )
         except crud.AppError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=exc.message,
+            )
+
+    raise HTTPException(
+        status_code=401,
+        detail="Authentication required",
+    )
 
     if session_cookie:
         payload = unsign_payload(session_cookie)
