@@ -769,8 +769,17 @@ async def login_get() -> HTMLResponse:
 
 
 @app.post("/login")
-async def login_post(jwt: Annotated[str, Form()]) -> RedirectResponse:
-    ctx = crud.resolve_auth_context(jwt=jwt, databases=databases, users=users, database_id=DATABASE_ID)
+async def login_post(
+    username: Annotated[str, Form()],
+    password: Annotated[str, Form()],
+):
+    ctx = crud.login_user(
+        username=username,
+        password=password,
+        databases=databases,
+        database_id=DATABASE_ID,
+    )
+
     response = RedirectResponse("/", status_code=303)
     set_session_cookie(response, ctx)
     return response
