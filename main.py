@@ -206,14 +206,13 @@ async def get_current_context(
 ) -> AuthContext:
     bearer = extract_bearer_token(authorization)
 
-    if bearer:
-        try:
-            return crud.resolve_auth_context(
-                jwt=bearer,
-                databases=databases,
-                users=users,
-                database_id=DATABASE_ID,
-            )
+    session = request.cookies.get("session")
+if session:
+    return crud.resolve_session(
+        session=session,
+        databases=databases,
+        database_id=DATABASE_ID,
+    )
         except crud.AppError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
 
