@@ -473,7 +473,7 @@ def list_staff(
         databases=databases,
         database_id=database_id,
         collection_id=COLLECTION_STAFF,
-        queries=[Query.order_asc("name")],
+       queries=[Query.equal("username", username)],
     )
 
     if ctx.role == AppRole.Accountant:
