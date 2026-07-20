@@ -390,39 +390,6 @@ def login_html() -> str:
 
   </form>
 </section>
-
-       <form method="post" action="/login" class="space-y-4">
-
-    <div>
-        <label class="mb-1 block text-sm font-bold text-slate-700">
-            Username
-        </label>
-        <input
-            type="text"
-            name="username"
-            required
-            class="w-full rounded-2xl border border-slate-200 px-4 py-3"
-            placeholder="Username">
-    </div>
-
-    <div>
-        <label class="mb-1 block text-sm font-bold text-slate-700">
-            Password
-        </label>
-        <input
-            type="password"
-            name="password"
-            required
-            class="w-full rounded-2xl border border-slate-200 px-4 py-3"
-            placeholder="Password">
-    </div>
-
-    <button class="w-full rounded-2xl bg-gradient-to-r from-cyan-400 to-blue-700 px-5 py-3 text-sm font-black text-white shadow-glow">
-        Login
-    </button>
-
-</form>
-        </section>
         """,
     )
 
