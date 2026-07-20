@@ -208,7 +208,7 @@ def list_documents(
             collection_id=collection_id,
             queries=queries or [],
         )
-        return response.get("documents", [])
+       return response.documents
     except AppwriteException as exc:
         raise appwrite_error(exc) from exc
 
