@@ -1144,7 +1144,42 @@ def dashboard_stats(
 
     return stats
 
+def login_user(
+    username: str,
+    password: str,
+    databases: Databases,
+    database_id: str,
+) -> AuthContext:
 
+    staff = list_documents(
+        databases=databases,
+        database_id=database_id,
+        collection_id=COLLECTION_STAFF,
+        queries=[
+            Query.equal("username", username),
+            Query.limit(1),
+        ],
+    )
+
+    if not staff:
+        raise AppError("Invalid username or password", 401)
+
+    user = staff[0]
+
+    if user.get("password") != password:
+        raise AppError("Invalid username or password", 401)
+
+    position = StaffPosition(user["position"])
+    role = position_to_role(position)
+
+    return AuthContext(
+        user_id=user["$id"],
+        email=user.get("email"),
+        staff_id=user["$id"],
+        name=user["name"],
+        position=position,
+        role=role,
+    )
 # ============================================================
 # Scribus / pypdf PDF Engine
 # ============================================================
