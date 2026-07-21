@@ -206,7 +206,7 @@ def list_documents(
         response = databases.list_documents(
             database_id=database_id,
             collection_id=collection_id,
-            queries=queries or []
+            queries=queries or [],
         )
        return response.documents
     except AppwriteException as exc:
