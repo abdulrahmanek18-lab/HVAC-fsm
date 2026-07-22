@@ -204,11 +204,11 @@ def list_documents(
 ) -> list[dict[str, Any]]:
     try:
        def list_documents(
-    databases: Databases,
+    databases,
     database_id: str,
     collection_id: str,
-    queries: Optional[list[str]] = None,
-) -> list[dict[str, Any]]:
+    queries: list | None = None,
+):
     try:
         response = databases.list_documents(
             database_id=database_id,
@@ -216,6 +216,9 @@ def list_documents(
             queries=queries or [],
         )
         return response.documents
+
+    except AppwriteException as exc:
+        raise appwrite_error(exc) from exc
 
     except AppwriteException as exc:
         raise appwrite_error(exc) from exc
