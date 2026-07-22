@@ -170,12 +170,15 @@ def update_document(
     data: dict[str, Any],
 ) -> dict[str, Any]:
     try:
-        return databases.update_document(
+        response = databases.update_document(
             database_id=database_id,
             collection_id=collection_id,
             document_id=document_id_value,
             data=serialize_for_appwrite(data),
         )
+        return response.to_dict() if hasattr(response, "to_dict") else response
+    except AppwriteException as exc:
+        raise appwrite_error(exc) from exc
 
 
 def delete_document(
