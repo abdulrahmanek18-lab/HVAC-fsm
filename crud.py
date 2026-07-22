@@ -300,21 +300,6 @@ def require_accounting_access(ctx: AuthContext) -> None:
     require_roles(ctx, {AppRole.Admin, AppRole.Accountant})
 
 
-def create_jwt_account(jwt: str) -> Account:
-    endpoint = os.getenv("APPWRITE_ENDPOINT")
-    project_id = os.getenv("APPWRITE_PROJECT_ID")
-
-    if not endpoint or not project_id:
-        raise AppError("Appwrite endpoint/project environment variables are missing", 500)
-
-    jwt_client = Client()
-    jwt_client.set_endpoint(endpoint)
-    jwt_client.set_project(project_id)
-    jwt_client.set_jwt(jwt)
-
-    return Account(jwt_client)
-
-
 # Fixed list_documents (removed duplicate imports & unreachable except blocks)
 def list_documents(
     databases: Databases,
