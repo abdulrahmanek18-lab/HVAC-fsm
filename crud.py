@@ -322,11 +322,96 @@ def create_jwt_account(jwt: str) -> Account:
     return Account(jwt_client)
 
 
-def verify_appwrite_jwt(jwt: str) -> dict[str, Any]:
+# Fixed list_documents (removed duplicate imports & unreachable except blocks)
+def list_documents(
+    databases: Databases,
+    database_id: str,
+    collection_id: str,
+    queries: Optional[list[str]] = None,
+) -> list[dict[str, Any]]:
     try:
-        return create_jwt_account(jwt).get()
+        response = databases.list_documents(
+            database_id=database_id,
+            collection_id=collection_id,
+            queries=queries or [],
+        )
+
+        if isinstance(response, dict):
+            docs = response.get("documents", [])
+        else:
+            docs = getattr(response, "documents", [])
+
+        result = []
+        for doc in docs:
+            if hasattr(doc, "to_dict"):
+                result.append(doc.to_dict())
+            elif isinstance(doc, dict):
+                result.append(doc)
+            else:
+                result.append(getattr(doc, "__dict__", {}))
+
+        return result
+
     except AppwriteException as exc:
-        raise AppError("Invalid or expired Appwrite JWT", 401, str(exc)) from exc
+        print(f"Appwrite API Error [{collection_id}]: {getattr(exc, 'message', exc)} (Code: {getattr(exc, 'code', 500)})")
+        raise appwrite_error(exc) from exc
+    except Exception as e:
+        print(f"Unexpected error fetching documents from {collection_id}: {str(e)}")
+        return []
+
+
+# Fixed list_staff (removed undefined 'username')
+def list_staff(
+    databases: Databases,
+    database_id: str,
+    ctx: AuthContext,
+) -> list[dict[str, Any]]:
+    require_roles(ctx, {AppRole.Admin, AppRole.Accountant})
+
+    staff = list_all_documents(
+        databases=databases,
+        database_id=database_id,
+        collection_id=COLLECTION_STAFF,
+        queries=[],
+    )
+
+    if ctx.role == AppRole.Accountant:
+        return [
+            {
+                "$id": s["$id"],
+                "name": s.get("name"),
+                "position": s.get("position"),
+                "base_salary": s.get("base_salary", 0),
+            }
+            for s in staff
+        ]
+
+    return staff
+
+
+# Completed upload_file_to_storage function
+def upload_file_to_storage(
+    storage: Storage,
+    ctx: AuthContext,
+    bucket_id: str,
+    filename: str,
+    content: bytes,
+    content_type: Optional[str] = None,
+) -> dict[str, Any]:
+    try:
+        input_file = InputFile.from_bytes(
+            bytes=content,
+            filename=filename,
+            mime_type=content_type or "application/octet-stream",
+        )
+        result = storage.create_file(
+            bucket_id=bucket_id,
+            file_id=ID.unique(),
+            file=input_file,
+        )
+        return result.to_dict() if hasattr(result, "to_dict") else result
+    except AppwriteException as exc:
+        raise appwrite_error(exc, "Failed to upload file to storage") from exc
 
 
 def find_staff_for_user(
