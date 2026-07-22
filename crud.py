@@ -176,8 +176,6 @@ def update_document(
             document_id=document_id_value,
             data=serialize_for_appwrite(data),
         )
-    except AppwriteException as exc:
-        raise appwrite_error(exc) from exc
 
 
 def delete_document(
