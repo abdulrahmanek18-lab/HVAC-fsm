@@ -203,19 +203,17 @@ def list_documents(
     queries: Optional[list[str]] = None,
 ) -> list[dict[str, Any]]:
     try:
-       def list_documents(
-    databases,
-    database_id: str,
-    collection_id: str,
-    queries: list | None = None,
-):
-    try:
         response = databases.list_documents(
             database_id=database_id,
             collection_id=collection_id,
             queries=queries or [],
         )
+        # Note: If using Appwrite Python SDK v5+, response is a dict:
+        # return response.get("documents", [])
         return response.documents
+    except Exception as e:
+        print(f"Error fetching documents from {collection_id}: {str(e)}")
+        return []
 
     except AppwriteException as exc:
         raise appwrite_error(exc) from exc
