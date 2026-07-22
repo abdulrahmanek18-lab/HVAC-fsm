@@ -196,6 +196,10 @@ def delete_document(
         raise appwrite_error(exc) from exc
 
 
+from typing import Any, Optional
+from appwrite.exception import AppwriteException
+from appwrite.services.databases import Databases
+
 def list_documents(
     databases: Databases,
     database_id: str,
@@ -208,13 +212,32 @@ def list_documents(
             collection_id=collection_id,
             queries=queries or [],
         )
-        # Note: If using Appwrite Python SDK v5+, response is a dict:
-        # return response.get("documents", [])
-        return response.documents
-    except Exception as e:
-        print(f"Error fetching documents from {collection_id}: {str(e)}")
-        return []
 
+        # 1. Extract documents safely whether response is a dict or SDK model
+        if isinstance(response, dict):
+            docs = response.get("documents", [])
+        else:
+            docs = getattr(response, "documents", [])
+
+        # 2. Normalize every document into a dictionary to match list[dict[str, Any]]
+        result = []
+        for doc in docs:
+            if hasattr(doc, "to_dict"):
+                result.append(doc.to_dict())
+            elif isinstance(doc, dict):
+                result.append(doc)
+            else:
+                # Fallback for dataclass/pydantic-like models
+                result.append(getattr(doc, "__dict__", {}))
+
+        return result
+
+    except AppwriteException as exc:
+        print(f"Appwrite API Error [{collection_id}]: {exc.message} (Code: {exc.code})")
+        raise appwrite_error(exc) from exc
+    except Exception as e:
+        print(f"Unexpected error fetching documents from {collection_id}: {str(e)}")
+        return []
     except AppwriteException as exc:
         raise appwrite_error(exc) from exc
 
