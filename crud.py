@@ -194,10 +194,6 @@ def delete_document(
         raise appwrite_error(exc) from exc
 
 
-from typing import Any, Optional
-from appwrite.exception import AppwriteException
-from appwrite.services.databases import Databases
-
 def list_documents(
     databases: Databases,
     database_id: str,
