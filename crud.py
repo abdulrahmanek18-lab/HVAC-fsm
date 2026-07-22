@@ -212,9 +212,7 @@ def list_documents(
             collection_id=collection_id,
             queries=queries or [],
         )
-print(type(response))
-print(type(response.documents[0]) if response.documents else "NO DOCUMENTS")
-print(response.documents[0] if response.documents else "NO DOCUMENTS")
+
         # 1. Extract documents safely whether response is a dict or SDK model
         if isinstance(response, dict):
             docs = response.get("documents", [])
