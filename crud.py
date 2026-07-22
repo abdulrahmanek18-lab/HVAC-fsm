@@ -235,13 +235,7 @@ def list_documents(
     except Exception as e:
         print(f"Unexpected error fetching documents from {collection_id}: {str(e)}")
         return []
-    except AppwriteException as exc:
-        raise appwrite_error(exc) from exc
-
-    except AppwriteException as exc:
-        raise appwrite_error(exc) from exc
-
-
+    
 def list_all_documents(
     databases: Databases,
     database_id: str,
