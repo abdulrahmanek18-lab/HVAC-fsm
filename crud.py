@@ -210,13 +210,11 @@ def list_documents(
             queries=queries or [],
         )
 
-        # 1. Extract documents safely whether response is a dict or SDK model
         if isinstance(response, dict):
             docs = response.get("documents", [])
         else:
             docs = getattr(response, "documents", [])
 
-        # 2. Normalize every document into a dictionary to match list[dict[str, Any]]
         result = []
         for doc in docs:
             if hasattr(doc, "to_dict"):
@@ -224,18 +222,18 @@ def list_documents(
             elif isinstance(doc, dict):
                 result.append(doc)
             else:
-                # Fallback for dataclass/pydantic-like models
                 result.append(getattr(doc, "__dict__", {}))
 
         return result
 
     except AppwriteException as exc:
-        print(f"Appwrite API Error [{collection_id}]: {exc.message} (Code: {exc.code})")
+        print(f"Appwrite API Error [{collection_id}]: {getattr(exc, 'message', exc)} (Code: {getattr(exc, 'code', 500)})")
         raise appwrite_error(exc) from exc
     except Exception as e:
         print(f"Unexpected error fetching documents from {collection_id}: {str(e)}")
         return []
-    
+
+
 def list_all_documents(
     databases: Databases,
     database_id: str,
@@ -300,45 +298,6 @@ def require_accounting_access(ctx: AuthContext) -> None:
     require_roles(ctx, {AppRole.Admin, AppRole.Accountant})
 
 
-# Fixed list_documents (removed duplicate imports & unreachable except blocks)
-def list_documents(
-    databases: Databases,
-    database_id: str,
-    collection_id: str,
-    queries: Optional[list[str]] = None,
-) -> list[dict[str, Any]]:
-    try:
-        response = databases.list_documents(
-            database_id=database_id,
-            collection_id=collection_id,
-            queries=queries or [],
-        )
-
-        if isinstance(response, dict):
-            docs = response.get("documents", [])
-        else:
-            docs = getattr(response, "documents", [])
-
-        result = []
-        for doc in docs:
-            if hasattr(doc, "to_dict"):
-                result.append(doc.to_dict())
-            elif isinstance(doc, dict):
-                result.append(doc)
-            else:
-                result.append(getattr(doc, "__dict__", {}))
-
-        return result
-
-    except AppwriteException as exc:
-        print(f"Appwrite API Error [{collection_id}]: {getattr(exc, 'message', exc)} (Code: {getattr(exc, 'code', 500)})")
-        raise appwrite_error(exc) from exc
-    except Exception as e:
-        print(f"Unexpected error fetching documents from {collection_id}: {str(e)}")
-        return []
-
-
-# Fixed list_staff (removed undefined 'username')
 def list_staff(
     databases: Databases,
     database_id: str,
@@ -367,7 +326,6 @@ def list_staff(
     return staff
 
 
-# Completed upload_file_to_storage function
 def upload_file_to_storage(
     storage: Storage,
     ctx: AuthContext,
@@ -389,6 +347,7 @@ def upload_file_to_storage(
         )
         return result.to_dict() if hasattr(result, "to_dict") else result
     except AppwriteException as exc:
+        raise appwrite_error(exc, "Failed to upload file to storage") from exc
         raise appwrite_error(exc, "Failed to upload file to storage") from exc
 
 
