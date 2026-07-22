@@ -3,14 +3,10 @@
     "name": "HVAC Field Management System",
     "environment": "production"
   },
-  "supabase": {
-    "url_env": "SUPABASE_URL",
-    "anon_key_env": "SUPABASE_ANON_KEY",
-    "service_role_key_env": "SUPABASE_SERVICE_ROLE_KEY"
-  },
-  "scribe": {
-    "api_base_url_env": "SCRIBE_API_BASE_URL",
-    "api_key_env": "SCRIBE_API_KEY",
-    "service_report_template_id_env": "SCRIBE_TEMPLATE_ID"
+  "appwrite": {
+    "endpoint_env": "APPWRITE_ENDPOINT",
+    "project_id_env": "APPWRITE_PROJECT_ID",
+    "api_key_env": "APPWRITE_API_KEY",
+    "database_id_env": "DATABASE_ID"
   }
 }
