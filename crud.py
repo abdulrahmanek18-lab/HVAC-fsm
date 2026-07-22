@@ -1175,8 +1175,8 @@ def login_user(
 
     user = staff[0]
 
-    if user.get("password") != password:
-        raise AppError("Invalid username or password", 401)
+   if user.password != password:
+    raise AppError("Invalid username or password", 401)
 
     position = StaffPosition(user["position"])
     role = position_to_role(position)
