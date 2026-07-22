@@ -1198,17 +1198,27 @@ def login_user(
 
     user = staff[0]
 
-   if user.password != password:
-    raise AppError("Invalid username or password", 401)
+  # 1. Check password safely (handling dict or object)
+    user_password = user.get("password") if isinstance(user, dict) else getattr(user, "password", None)
 
-    position = StaffPosition(user["position"])
+    if user_password != password:
+        raise AppError("Invalid username or password", 401)
+
+    # 2. Extract fields safely (works whether 'user' is dict or Appwrite Document model)
+    user_id = user["$id"] if isinstance(user, dict) else getattr(user, "$id", getattr(user, "id", None))
+    user_email = user.get("email") if isinstance(user, dict) else getattr(user, "email", None)
+    user_name = user.get("name") if isinstance(user, dict) else getattr(user, "name", None)
+    raw_position = user.get("position") if isinstance(user, dict) else getattr(user, "position", None)
+
+    position = StaffPosition(raw_position)
     role = position_to_role(position)
 
+    # 3. Return AuthContext
     return AuthContext(
-        user_id=user["$id"],
-        email=user.get("email"),
-        staff_id=user["$id"],
-        name=user["name"],
+        user_id=user_id,
+        email=user_email,
+        staff_id=user_id,
+        name=user_name,
         position=position,
         role=role,
     )
