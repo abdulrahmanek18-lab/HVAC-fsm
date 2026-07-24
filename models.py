@@ -113,6 +113,8 @@ class StaffDocuments(BaseModel):
 class StaffCreate(BaseModel):
     user_id: Optional[str] = None
     email: Optional[EmailStr] = None
+    username: str = Field(min_length=1)           # <-- ADDED FOR LOGIN
+    password: str = Field(min_length=1)           # <-- ADDED FOR LOGIN
     name: str = Field(min_length=1)
     position: StaffPosition
     base_salary: float = Field(default=0, ge=0)
@@ -123,6 +125,8 @@ class StaffCreate(BaseModel):
 class StaffUpdate(BaseModel):
     user_id: Optional[str] = None
     email: Optional[EmailStr] = None
+    username: Optional[str] = Field(default=None, min_length=1)  # <-- ADDED
+    password: Optional[str] = Field(default=None, min_length=1)  # <-- ADDED
     name: Optional[str] = Field(default=None, min_length=1)
     position: Optional[StaffPosition] = None
     base_salary: Optional[float] = Field(default=None, ge=0)
