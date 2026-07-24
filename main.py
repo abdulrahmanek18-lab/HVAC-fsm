@@ -729,6 +729,8 @@ def staff_page(ctx: AuthContext) -> str:
           <h2 class="text-xl font-black">Create Staff Record</h2>
           <p class="mt-1 text-sm text-slate-500">Link staff to an Appwrite user by user_id or email. Position controls server-side RBAC.</p>
           <form method="post" action="/ui/staff" class="mt-4 grid gap-3 md:grid-cols-2">
+            <input name="username" required class="rounded-2xl border px-4 py-3" placeholder="Username (for login)">
+            <input name="password" required type="password" class="rounded-2xl border px-4 py-3" placeholder="Password (for login)">
             <input name="name" required class="rounded-2xl border px-4 py-3" placeholder="Staff Name">
             <input name="email" type="email" class="rounded-2xl border px-4 py-3" placeholder="Email">
             <input name="user_id" class="rounded-2xl border px-4 py-3" placeholder="Appwrite User ID">
@@ -955,6 +957,8 @@ async def ui_update_settings(
 @app.post("/ui/staff")
 async def ui_create_staff(
     ctx: Annotated[AuthContext, Depends(get_current_context)],
+    username: Annotated[str, Form()],
+    password: Annotated[str, Form()],
     name: Annotated[str, Form()],
     position: Annotated[str, Form()],
     base_salary: Annotated[float, Form()] = 0,
@@ -970,6 +974,8 @@ async def ui_create_staff(
     payload = StaffCreate(
         user_id=user_id or None,
         email=email or None,
+        username=username,
+        password=password,
         name=name,
         position=StaffPosition(position),
         base_salary=base_salary,
